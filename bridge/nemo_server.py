@@ -7,7 +7,9 @@ import io
 import json
 import logging
 import subprocess
+import threading
 import time
+import uuid
 from typing import Any, Optional
 
 import pyautogui
@@ -18,6 +20,7 @@ from PIL import Image
 
 from core.security.gateway_v2 import SecurityGateway
 from core.security.audit_logger_v2 import AuditLogger
+from core.security.action_classifier import classify, RiskLevel
 
 
 app = Flask(__name__)
@@ -26,6 +29,10 @@ logger = logging.getLogger("nemo.server")
 # Global references (will be injected at startup)
 _gateway: Optional[SecurityGateway] = None
 _audit_logger: Optional[AuditLogger] = None
+
+# Pending actions awaiting confirmation (token -> action data)
+_pending_actions: dict[str, dict[str, Any]] = {}
+_pending_lock = threading.Lock()
 
 # Disable pyautogui safety pause
 pyautogui.PAUSE = 0
@@ -86,7 +93,7 @@ def screenshot() -> dict[str, Any]:
 
 @app.route("/execute", methods=["POST"])
 def execute() -> dict[str, Any]:
-    """Execute an action on the PC."""
+    """Execute an action on the PC with risk assessment."""
     try:
         data = request.get_json() or {}
         action = data.get("action", "")
@@ -103,7 +110,43 @@ def execute() -> dict[str, Any]:
                 "error": "action is required",
             }), 400
 
-        # Execute the action
+        # Classify risk level
+        classification = classify(action, target, value, user)
+        logger.debug(f"Risk classification: {classification.risk_level.value} - {classification.reason}")
+
+        # HIGH risk: require confirmation
+        if classification.risk_level == RiskLevel.HIGH:
+            token = str(uuid.uuid4())
+            with _pending_lock:
+                _pending_actions[token] = {
+                    "action": action,
+                    "target": target,
+                    "value": value,
+                    "user": user,
+                    "channel": channel,
+                    "timestamp": time.time(),
+                }
+
+            logger.warning(f"HIGH risk action requires confirmation: {action} (token={token})")
+            if _audit_logger:
+                _audit_logger.log(
+                    user_id=user,
+                    action=f"{action}_pending",
+                    target=target or "",
+                    allowed=False,
+                    reason=f"Pending confirmation: {classification.reason}",
+                )
+
+            return jsonify({
+                "success": False,
+                "requires_confirmation": True,
+                "confirmation_token": token,
+                "risk_level": classification.risk_level.value,
+                "reason": classification.reason,
+                "message": f"High-risk action requires your approval. Use /confirm with token to proceed.",
+            }), 202
+
+        # Execute immediately for LOW/MEDIUM risk
         exec_result = _execute_action(action, target, value)
 
         # Log to audit
@@ -113,7 +156,7 @@ def execute() -> dict[str, Any]:
                 action=action,
                 target=target or "",
                 allowed=exec_result.get("success", False),
-                reason=f"{channel}: {exec_result.get('error', 'ok')}",
+                reason=f"{classification.risk_level.value}: {exec_result.get('error', 'ok')}",
             )
 
         logger.info(f"Action completed: {action} → {exec_result}")
@@ -332,6 +375,106 @@ def _capture_screenshot() -> Optional[str]:
     except Exception as exc:
         logger.error(f"Screenshot capture failed: {exc}")
         return None
+
+
+@app.route("/confirm", methods=["POST"])
+def confirm() -> dict[str, Any]:
+    """Confirm and execute a pending HIGH-risk action."""
+    try:
+        data = request.get_json() or {}
+        token = data.get("token", "")
+        approved = data.get("approved", False)
+
+        logger.info(f"Confirmation request: token={token[:8]}..., approved={approved}")
+
+        if not token:
+            return jsonify({
+                "success": False,
+                "error": "token is required",
+            }), 400
+
+        # Look up pending action
+        with _pending_lock:
+            pending = _pending_actions.pop(token, None)
+
+        if not pending:
+            logger.warning(f"Confirmation token not found or expired: {token}")
+            return jsonify({
+                "success": False,
+                "error": "Token not found or expired",
+            }), 404
+
+        # Check if expired (60 seconds)
+        if time.time() - pending["timestamp"] > 60:
+            logger.warning(f"Confirmation token expired: {token}")
+            return jsonify({
+                "success": False,
+                "error": "Token expired (must confirm within 60 seconds)",
+            }), 410
+
+        # USER DENIED
+        if not approved:
+            logger.warning(f"User denied action: {pending['action']}")
+            if _audit_logger:
+                _audit_logger.log(
+                    user_id=pending["user"],
+                    action=pending["action"],
+                    target=pending["target"] or "",
+                    allowed=False,
+                    reason="User denied high-risk action",
+                )
+            return jsonify({
+                "success": False,
+                "error": "Action denied by user",
+            }), 403
+
+        # USER APPROVED - Execute the action
+        logger.info(f"User approved action: {pending['action']}")
+        exec_result = _execute_action(
+            pending["action"],
+            pending["target"],
+            pending["value"],
+        )
+
+        # Log to audit
+        if _audit_logger:
+            _audit_logger.log(
+                user_id=pending["user"],
+                action=pending["action"],
+                target=pending["target"] or "",
+                allowed=exec_result.get("success", False),
+                reason=f"User-approved: {pending['channel']}",
+            )
+
+        logger.info(f"Action confirmed and executed: {pending['action']} → {exec_result}")
+        return jsonify(exec_result)
+
+    except Exception as exc:
+        logger.error(f"Confirm endpoint error: {exc}", exc_info=True)
+        return jsonify({
+            "success": False,
+            "error": str(exc),
+        }), 500
+
+
+def _cleanup_expired_tokens() -> None:
+    """Periodically clean up expired confirmation tokens."""
+    while True:
+        try:
+            time.sleep(30)  # Check every 30 seconds
+            with _pending_lock:
+                now = time.time()
+                expired = [k for k, v in _pending_actions.items() if now - v["timestamp"] > 60]
+                for token in expired:
+                    del _pending_actions[token]
+                    logger.debug(f"Cleaned up expired token: {token}")
+        except Exception as exc:
+            logger.error(f"Token cleanup error: {exc}")
+
+
+# Start cleanup daemon thread
+_cleanup_thread = threading.Thread(target=_cleanup_expired_tokens, daemon=True)
+_cleanup_thread.start()
 
 
 def start_server(
