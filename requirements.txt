@@ -1,0 +1,27 @@
+# NEMO-OS System Requirements
+# Core dependencies
+
+# Security: Runtime validation
+Pydantic>=2.0
+
+# Service: Platform integration (Windows optional)
+psutil>=6.0
+
+# Bus: Binary serialization (optional, falls back to JSON)
+msgpack>=1.0
+
+# Action Executor: OS automation
+pyautogui>=0.9.53
+mss>=9.0.1
+pygetwindow>=0.0.9
+Pillow>=10.0.0
+
+# AI/Vision/Voice: Ollama, Requests
+requests>=2.31.0
+RealtimeSTT>=0.0.23
+
+# Web: Flask for OpenClaw bridge
+Flask>=3.0.0
+
+# Optional: Uncomment for Windows service support
+# pywin32>=305
