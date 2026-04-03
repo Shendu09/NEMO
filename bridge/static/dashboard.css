@@ -1,0 +1,230 @@
+/* NEMO-OS Dashboard Styles */
+
+body {
+    background-color: #f8f9fa;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+}
+
+.navbar {
+    box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+}
+
+.navbar-brand {
+    font-weight: 600;
+    letter-spacing: 0.5px;
+}
+
+.card {
+    border: none;
+    box-shadow: 0 1px 3px rgba(0,0,0,0.08);
+    margin-bottom: 1rem;
+    border-radius: 8px;
+}
+
+.card-body {
+    padding: 1.5rem;
+}
+
+.badge {
+    padding: 0.35rem 0.65rem;
+    font-weight: 500;
+}
+
+/* Audit Log Styles */
+
+.audit-log-container {
+    max-height: 600px;
+    overflow-y: auto;
+}
+
+.audit-entry {
+    border-left: 4px solid #ddd;
+    padding: 1rem;
+    margin-bottom: 0.5rem;
+    background: white;
+    border-radius: 4px;
+    font-size: 0.9rem;
+    transition: all 0.2s ease;
+}
+
+.audit-entry:hover {
+    box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+}
+
+.audit-entry.LOW {
+    border-left-color: #198754;
+}
+
+.audit-entry.MEDIUM {
+    border-left-color: #ffc107;
+}
+
+.audit-entry.HIGH {
+    border-left-color: #dc3545;
+}
+
+.audit-entry-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 0.5rem;
+}
+
+.audit-entry-time {
+    color: #6c757d;
+    font-size: 0.85rem;
+}
+
+.audit-entry-action {
+    font-weight: 600;
+    margin-right: auto;
+}
+
+.audit-entry-risk {
+    font-size: 0.75rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    margin-left: 0.5rem;
+}
+
+.audit-entry-details {
+    color: #495057;
+    margin-top: 0.5rem;
+}
+
+.audit-entry-user {
+    color: #0d6efd;
+    font-weight: 500;
+}
+
+/* Pending Actions Styles */
+
+.pending-actions-container {
+    max-height: 600px;
+    overflow-y: auto;
+}
+
+.pending-action {
+    border: 2px solid #dc3545;
+    padding: 1.5rem;
+    margin-bottom: 1rem;
+    background: #fff5f5;
+    border-radius: 8px;
+}
+
+.pending-action-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 1rem;
+}
+
+.pending-action-title {
+    font-weight: 600;
+    font-size: 1.1rem;
+    color: #dc3545;
+}
+
+.pending-action-timer {
+    color: #6c757d;
+    font-size: 0.9rem;
+}
+
+.pending-action-details {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 1rem;
+    margin-bottom: 1rem;
+}
+
+.pending-action-details p {
+    margin: 0;
+    font-size: 0.9rem;
+}
+
+.pending-action-details strong {
+    color: #495057;
+}
+
+.pending-action-buttons {
+    display: flex;
+    gap: 0.5rem;
+}
+
+.pending-action-buttons button {
+    flex: 1;
+}
+
+/* Filtering and Search */
+
+.form-control:focus,
+.form-select:focus {
+    border-color: #0d6efd;
+    box-shadow: 0 0 0 0.2rem rgba(13, 110, 253, 0.25);
+}
+
+/* Stats Panel */
+
+#risk-chart {
+    max-height: 300px;
+}
+
+#top-actions {
+    list-style: none;
+    padding: 0;
+}
+
+#top-actions .action-item {
+    display: flex;
+    justify-content: space-between;
+    padding: 0.5rem 0;
+    border-bottom: 1px solid #e9ecef;
+}
+
+#top-actions .action-item:last-child {
+    border-bottom: none;
+}
+
+#top-actions .action-count {
+    color: #0d6efd;
+    font-weight: 600;
+}
+
+/* Responsive */
+
+@media (max-width: 768px) {
+    .pending-action-details {
+        grid-template-columns: 1fr;
+    }
+
+    .pending-action-buttons {
+        flex-direction: column;
+    }
+
+    .audit-entry {
+        padding: 0.75rem;
+    }
+}
+
+/* Scrollbar styling */
+
+.audit-log-container::-webkit-scrollbar,
+.pending-actions-container::-webkit-scrollbar {
+    width: 8px;
+}
+
+.audit-log-container::-webkit-scrollbar-track,
+.pending-actions-container::-webkit-scrollbar-track {
+    background: #f1f1f1;
+}
+
+.audit-log-container::-webkit-scrollbar-thumb,
+.pending-actions-container::-webkit-scrollbar-thumb {
+    background: #888;
+    border-radius: 4px;
+}
+
+.audit-log-container::-webkit-scrollbar-thumb:hover,
+.pending-actions-container::-webkit-scrollbar-thumb:hover {
+    background: #555;
+}

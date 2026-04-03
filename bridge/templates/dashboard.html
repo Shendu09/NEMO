@@ -1,0 +1,144 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>NEMO-OS Security Dashboard</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+    <link rel="stylesheet" href="{{ url_for('static', filename='dashboard.css') }}">
+</head>
+<body>
+    <nav class="navbar navbar-dark bg-dark">
+        <div class="container-fluid">
+            <span class="navbar-brand mb-0 h1">🔐 NEMO-OS Dashboard</span>
+            <div class="text-white">
+                <small id="status-indicator" class="badge bg-success">● ONLINE</small>
+            </div>
+        </div>
+    </nav>
+
+    <div class="container-fluid mt-4">
+        <!-- Status Cards Row -->
+        <div class="row mb-4">
+            <div class="col-md-3">
+                <div class="card">
+                    <div class="card-body">
+                        <h6 class="card-title text-muted">Total Actions</h6>
+                        <h2 id="stat-total" class="card-text">0</h2>
+                    </div>
+                </div>
+            </div>
+            <div class="col-md-3">
+                <div class="card">
+                    <div class="card-body">
+                        <h6 class="card-title text-muted">Success Rate</h6>
+                        <h2 id="stat-success" class="card-text">0%</h2>
+                    </div>
+                </div>
+            </div>
+            <div class="col-md-3">
+                <div class="card">
+                    <div class="card-body">
+                        <h6 class="card-title text-muted">Risk Breakdown</h6>
+                        <small>
+                            <span class="badge bg-success" id="stat-low">LOW: 0</span>
+                            <span class="badge bg-warning" id="stat-medium">MED: 0</span>
+                            <span class="badge bg-danger" id="stat-high">HIGH: 0</span>
+                        </small>
+                    </div>
+                </div>
+            </div>
+            <div class="col-md-3">
+                <div class="card">
+                    <div class="card-body">
+                        <h6 class="card-title text-muted">Pending Approvals</h6>
+                        <h2 id="stat-pending" class="card-text">0</h2>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Tabs for different views -->
+        <ul class="nav nav-tabs" role="tablist">
+            <li class="nav-item" role="presentation">
+                <button class="nav-link active" id="audit-tab" data-bs-toggle="tab" data-bs-target="#audit-panel" type="button" role="tab">
+                    📋 Audit Log
+                </button>
+            </li>
+            <li class="nav-item" role="presentation">
+                <button class="nav-link" id="pending-tab" data-bs-toggle="tab" data-bs-target="#pending-panel" type="button" role="tab">
+                    ⏳ Pending Actions (<span id="pending-count">0</span>)
+                </button>
+            </li>
+            <li class="nav-item" role="presentation">
+                <button class="nav-link" id="stats-tab" data-bs-toggle="tab" data-bs-target="#stats-panel" type="button" role="tab">
+                    📊 Statistics
+                </button>
+            </li>
+        </ul>
+
+        <div class="tab-content mt-4">
+            <!-- Audit Log Tab -->
+            <div class="tab-pane fade show active" id="audit-panel" role="tabpanel">
+                <div class="row mb-3">
+                    <div class="col-md-6">
+                        <input type="text" id="audit-search" class="form-control" placeholder="Search audit log...">
+                    </div>
+                    <div class="col-md-3">
+                        <select id="risk-filter" class="form-select">
+                            <option value="">All Risk Levels</option>
+                            <option value="LOW">LOW Risk</option>
+                            <option value="MEDIUM">MEDIUM Risk</option>
+                            <option value="HIGH">HIGH Risk</option>
+                        </select>
+                    </div>
+                    <div class="col-md-3">
+                        <button id="refresh-btn" class="btn btn-primary w-100">
+                            🔄 Refresh
+                        </button>
+                    </div>
+                </div>
+
+                <div id="audit-log" class="audit-log-container">
+                    <div class="alert alert-info">Loading audit log...</div>
+                </div>
+            </div>
+
+            <!-- Pending Actions Tab -->
+            <div class="tab-pane fade" id="pending-panel" role="tabpanel">
+                <div id="pending-actions" class="pending-actions-container">
+                    <div class="alert alert-info">No pending actions</div>
+                </div>
+            </div>
+
+            <!-- Statistics Tab -->
+            <div class="tab-pane fade" id="stats-panel" role="tabpanel">
+                <div class="row">
+                    <div class="col-md-6">
+                        <div class="card">
+                            <div class="card-body">
+                                <h5 class="card-title">Actions by Risk Level</h5>
+                                <canvas id="risk-chart"></canvas>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="col-md-6">
+                        <div class="card">
+                            <div class="card-body">
+                                <h5 class="card-title">Top Actions</h5>
+                                <div id="top-actions" class="small">
+                                    <p class="text-muted">Loading...</p>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.0.0/dist/chart.umd.min.js"></script>
+    <script src="{{ url_for('static', filename='dashboard.js') }}"></script>
+</body>
+</html>
