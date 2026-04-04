@@ -51,27 +51,29 @@ def cmd_run(task: str = None) -> int:
         logger = logging.getLogger("nemo.main")
 
         # Import after logging is setup
-        from core.bus import BusServer, BusClient
-        from core.security import SecurityGateway, AuditLogger
+        from core.bus import BusServer
+        from core.security.gateway_v2 import SecurityGateway
+        from core.security.audit_logger_v2 import AuditLogger
         from bridge.nemo_server import start_server as start_http
+        import requests
 
         logger.info("=" * 60)
         logger.info("Starting NEMO-OS with all components")
         logger.info("=" * 60)
 
         # 1. Start BusServer (IPC message bus)
-        logger.info("[1/4] Starting IPC Bus Server...")
+        logger.info("[1/6] Starting IPC Bus Server...")
         bus_server = BusServer()
         bus_thread = threading.Thread(
             target=bus_server.start,
             daemon=True,
         )
         bus_thread.start()
-        time.sleep(0.5)
+        time.sleep(0.3)
         logger.info("      ✓ IPC Bus running")
 
         # 2. Initialize SecurityGateway and AuditLogger
-        logger.info("[2/4] Initializing Security Layer...")
+        logger.info("[2/6] Initializing Security Layer...")
         gateway = SecurityGateway(
             data_dir=CONFIG_DIR,
             dry_run=False,
@@ -82,54 +84,134 @@ def cmd_run(task: str = None) -> int:
         logger.info("      ✓ RBAC engine active")
         logger.info("      ✓ Audit logger ready")
 
-        # 3. Start NEMO HTTP Server
-        logger.info("[3/4] Starting HTTP API Server on :8765...")
+        # 3. Start NEMO HTTP Server on port 8765
+        logger.info("[3/6] Starting HTTP API Server on :8765...")
         http_thread = threading.Thread(
             target=start_http,
             args=(gateway, audit_logger, "0.0.0.0", 8765),
             daemon=True,
         )
         http_thread.start()
-        time.sleep(0.5)
-        logger.info("      ✓ HTTP API ready")
+        time.sleep(0.5)  # Give server time to start
+        logger.info("      ✓ HTTP API ready on :8765")
 
-        # 4. Connect BusClient for demos (optional - not needed for HTTP API)
-        logger.info("[4/4] Starting message bus client...")
+        # 4. Start Voice Listener
+        logger.info("[4/6] Starting Voice Listener...")
         try:
-            bus_client = BusClient()
-            bus_client.connect()
-            logger.info("      ✓ BusClient connected")
+            from core.voice import wake_listener
+            
+            def handle_voice_command(command: str) -> None:
+                """Handle voice command by sending to /task endpoint."""
+                logger.info(f"Voice command received: {command}")
+                try:
+                    response = requests.post(
+                        "http://localhost:8765/task",
+                        json={
+                            "command": command,
+                            "user": "voice",
+                            "channel": "voice",
+                        },
+                        timeout=60,
+                    )
+                    result = response.json()
+                    logger.info(f"✓ Voice command executed: {result.get('message', 'done')}")
+                except Exception as e:
+                    logger.error(f"Voice command failed: {e}")
+            
+            # Start voice listener in daemon thread
+            wake_listener.start(handle_voice_command)
+            logger.info("      ✓ Voice listener active")
+        except ImportError:
+            logger.warning("      ⚠ Voice module not available (optional)")
         except Exception as e:
-            logger.warning(f"      ⚠ BusClient failed (optional): {e}")
-            bus_client = None
+            logger.warning(f"      ⚠ Voice listener failed to start (optional): {e}")
 
-        # Print startup info
-        print("\n" + "=" * 60)
-        print("NEMO-OS is running")
-        print("=" * 60)
-        print(f"  IPC Bus:       http://localhost:8765 (via NEMO HTTP API)")
-        print(f"  HTTP API:      http://localhost:8765")
-        print(f"  Security:      ✓ RBAC + ThreatDetection + Sandbox")
-        print(f"  Data dir:      {CONFIG_DIR}")
-        print(f"  Audit log:     {CONFIG_DIR / 'audit.log'}")
-        print("=" * 60)
+        # 5. Start Health Monitor
+        logger.info("[5/6] Starting Health Monitor...")
+        try:
+            from core.service.health_monitor import HealthMonitor
+            from core.service.config import ServiceConfig
+            
+            health_config = ServiceConfig()
+            
+            def on_critical(status):
+                logger.warning(f"Health alert: {status.summary()}")
+            
+            health_monitor = HealthMonitor(
+                config=health_config,
+                on_critical=on_critical,
+            )
+            health_thread = threading.Thread(
+                target=health_monitor.start,
+                daemon=True,
+            )
+            health_thread.start()
+            logger.info("      ✓ Health monitor running")
+        except Exception as e:
+            logger.warning(f"      ⚠ Health monitor failed (optional): {e}")
+            health_monitor = None
 
-        # Execute task if provided
+        # 6. Print startup banner
+        logger.info("[6/6] System startup complete")
+        
+        print("\n")
+        print("╔══════════════════════════════════════╗")
+        print("║         NEMO-OS  is  running         ║")
+        print("║  HTTP  →  http://localhost:8765      ║")
+        print("║  Dashboard → http://localhost:8766   ║")
+        print("║  Voice → Say  \"V <your command>\"    ║")
+        print("╚══════════════════════════════════════╝")
+        print()
+
+        # Execute task if provided (via --task argument)
         if task:
-            print(f"\nExecuting task: {task}\n")
-            _execute_task(task)
-            print("\nTask completed. NEMO is still running.")
+            logger.info(f"Executing task via /task endpoint: {task}")
+            print(f"\n[*] Executing task: {task}\n")
+            try:
+                response = requests.post(
+                    "http://localhost:8765/task",
+                    json={
+                        "command": task,
+                        "user": "cli",
+                        "channel": "cli_task",
+                    },
+                    timeout=60,
+                )
+                result = response.json()
+                
+                # Print results
+                print(f"Command: {result.get('command')}")
+                print(f"Status:  {'✓ SUCCESS' if result.get('success') else '✗ FAILED'}")
+                print(f"Message: {result.get('message')}")
+                print(f"Steps:   {result.get('steps_completed')}/{result.get('total_steps')}")
+                
+                if result.get('actions'):
+                    print("\nAction Details:")
+                    for action in result.get('actions', []):
+                        status = "✓" if action.get('status') == 'success' else "✗"
+                        print(f"  {status} Step {action.get('step')}: {action.get('action')}", end="")
+                        if action.get('target'):
+                            print(f" → {action.get('target')}", end="")
+                        if action.get('value'):
+                            print(f" ('{action.get('value')}')", end="")
+                        if action.get('error'):
+                            print(f"\n       Error: {action.get('error')}", end="")
+                        print()
+                
+                print(f"\n[*] Task completed. NEMO is still running.\n")
+                
+            except Exception as e:
+                logger.error(f"Task execution failed: {e}")
+                print(f"[!] Task failed: {e}\n")
 
-        # Keep alive
-        print("\nPress Ctrl+C to stop NEMO\n")
+        # Keep alive loop
+        print("[*] Press Ctrl+C to stop NEMO\n")
         try:
             while True:
                 time.sleep(1)
         except KeyboardInterrupt:
             print("\n[*] Shutting down NEMO...")
             bus_server.stop()
-            if bus_client:
-                bus_client.disconnect()
             logger.info("NEMO shut down cleanly")
             return 0
 
@@ -138,63 +220,6 @@ def cmd_run(task: str = None) -> int:
         import traceback
         traceback.print_exc()
         return 1
-
-
-def _execute_task(task: str) -> None:
-    """Execute a demo task via HTTP API."""
-    from bridge.nemo_server import app as nemo_app
-
-    with nemo_app.test_client() as client:
-        # Simple task parser: "open chrome and search TERM"
-        if "open" in task.lower() and ("chrome" in task.lower() or "browser" in task.lower()):
-            print("  [>] Opening Chrome...")
-            resp = client.post(
-                "/execute",
-                json={
-                    "action": "open_app",
-                    "target": "chrome",
-                    "user": "demo",
-                    "channel": "demo",
-                },
-            )
-            result = resp.get_json()
-            print(f"      {'✓' if result.get('success') else '✗'} {result.get('success', False)}")
-
-        search_term = ""
-        if "search" in task.lower():
-            # Extract search term after "search"
-            parts = task.lower().split("search")
-            if len(parts) > 1:
-                search_term = parts[1].strip()
-
-        if search_term:
-            time.sleep(0.5)
-            print(f"  [>] Typing: {search_term}")
-            resp = client.post(
-                "/execute",
-                json={
-                    "action": "type",
-                    "value": search_term,
-                    "user": "demo",
-                    "channel": "demo",
-                },
-            )
-            result = resp.get_json()
-            print(f"      {'✓' if result.get('success') else '✗'} {result.get('text_length', 0)} characters typed")
-
-            time.sleep(0.2)
-            print("  [>] Pressing Enter...")
-            resp = client.post(
-                "/execute",
-                json={
-                    "action": "press_key",
-                    "value": "enter",
-                    "user": "demo",
-                    "channel": "demo",
-                },
-            )
-            result = resp.get_json()
-            print(f"      {'✓' if result.get('success') else '✗'} {result.get('keys', '?')}")
 
 
 def cmd_health() -> int:
@@ -222,12 +247,19 @@ def main() -> int:
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Commands:
-  run       Run NEMO-OS in foreground (development mode)
+  run       Run NEMO-OS in foreground with all components
   health    Check if NEMO is running
   
 Examples:
+  # Start NEMO with voice listening
   python clevrr_service.py run
-  python clevrr_service.py run --task "open chrome and search python"
+  
+  # Execute a task and keep running
+  python clevrr_service.py run --task "play BTS V on youtube"
+  python clevrr_service.py run --task "summarize https://bbc.com"
+  python clevrr_service.py run --task "open whatsapp and send hi to Rohitha"
+  
+  # Check health
   python clevrr_service.py health
         """
     )
