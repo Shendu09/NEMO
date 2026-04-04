@@ -28,6 +28,8 @@ from PIL import Image
 from core.security.gateway_v2 import SecurityGateway
 from core.security.audit_logger_v2 import AuditLogger
 from core.security.action_classifier import classify, RiskLevel
+from core.vision.omniparser_vision import find_element
+from core.browser.web_agent import browse, search_web, summarize_page, play_youtube, play_song
 from flask import render_template
 
 
@@ -447,6 +449,16 @@ def _execute_action(action: str, target: str, value: str) -> dict[str, Any]:
         return _action_screenshot()
     elif action == "wait":
         return _action_wait(value)
+    elif action == "browse":
+        return _action_browse(target)
+    elif action == "search":
+        return _action_search(value)
+    elif action == "summarize":
+        return _action_summarize(target)
+    elif action == "play":
+        return _action_play(value or target)
+    elif action == "play_song":
+        return _action_play_song(value or target)
     else:
         return {
             "success": False,
@@ -681,10 +693,60 @@ def _action_press_key(keys: str) -> dict[str, Any]:
 
 
 def _action_click(coords: str) -> dict[str, Any]:
-    """Click at coordinates."""
+    """
+    Click at coordinates or on a named UI element.
+    
+    Supports two formats:
+    1. "x,y" - Direct pixel coordinates (e.g., "100,200")
+    2. "target:element_name" - AI vision to find element (e.g., "target:Send Button")
+    """
     logger.debug(f"Clicking: {coords}")
 
     try:
+        # Check if using vision-based targeting
+        if coords.startswith("target:"):
+            target_name = coords[7:].strip()  # Remove "target:" prefix
+            logger.info(f"Using AI vision to find and click: {target_name}")
+            
+            # Capture screenshot for vision analysis
+            screenshot_b64 = _capture_screenshot()
+            if not screenshot_b64:
+                return {
+                    "success": False,
+                    "error": "Failed to capture screenshot for element detection",
+                }
+            
+            # Use OmniParser to find element
+            result = find_element(screenshot_b64, target_name)
+            
+            if not result.get("found", False):
+                logger.warning(f"Element not found: {target_name}")
+                return {
+                    "success": False,
+                    "error": f"Element not found: {target_name}",
+                }
+            
+            x = result["x"]
+            y = result["y"]
+            label = result["label"]
+            confidence = result["confidence"]
+            
+            logger.info(f"Found '{label}' at ({x}, {y}) with confidence {confidence:.2f}")
+            
+            # Click at found coordinates
+            pyautogui.click(x, y)
+            
+            return {
+                "success": True,
+                "action": "click",
+                "x": x,
+                "y": y,
+                "target": target_name,
+                "found_label": label,
+                "confidence": confidence,
+            }
+        
+        # Standard x,y coordinate format
         x, y = map(int, coords.split(","))
         pyautogui.click(x, y)
         logger.info(f"Clicked at ({x}, {y})")
@@ -747,6 +809,154 @@ def _action_wait(seconds: str) -> dict[str, Any]:
         return {
             "success": False,
             "error": str(exc),
+        }
+
+
+def _action_browse(url: str) -> dict[str, Any]:
+    """Browse a URL and extract content."""
+    logger.info(f"Browsing: {url}")
+
+    try:
+        result = browse(url)
+        
+        if not result.get("success", False):
+            return {
+                "success": False,
+                "action": "browse",
+                "error": result.get("error", "Unknown error"),
+                "url": url,
+            }
+        
+        return {
+            "success": True,
+            "action": "browse",
+            "url": result.get("url", url),
+            "title": result.get("title", ""),
+            "text": result.get("text", "")[:1000],  # Limit text in response
+            "link_count": len(result.get("links", [])),
+            "links": result.get("links", [])[:10],  # Top 10 links
+            "screenshot": result.get("screenshot_b64", ""),
+        }
+    except Exception as exc:
+        logger.error(f"Browse failed: {exc}")
+        return {
+            "success": False,
+            "action": "browse",
+            "error": str(exc),
+            "url": url,
+        }
+
+
+def _action_search(query: str) -> dict[str, Any]:
+    """Search the web."""
+    logger.info(f"Searching: {query}")
+
+    try:
+        result = search_web(query)
+        
+        return {
+            "success": True,
+            "action": "search",
+            "query": query,
+            "result_count": len(result.get("results", [])),
+            "results": result.get("results", []),
+        }
+    except Exception as exc:
+        logger.error(f"Search failed: {exc}")
+        return {
+            "success": False,
+            "action": "search",
+            "error": str(exc),
+            "query": query,
+        }
+
+
+def _action_summarize(url: str) -> dict[str, Any]:
+    """Summarize a webpage."""
+    logger.info(f"Summarizing: {url}")
+
+    try:
+        result = summarize_page(url)
+        
+        return {
+            "success": True,
+            "action": "summarize",
+            "url": url,
+            "title": result.get("title", ""),
+            "summary": result.get("summary", ""),
+            "text_length": result.get("full_text_length", 0),
+        }
+    except Exception as exc:
+        logger.error(f"Summarize failed: {exc}")
+        return {
+            "success": False,
+            "action": "summarize",
+            "error": str(exc),
+            "url": url,
+        }
+
+
+def _action_play(query: str) -> dict[str, Any]:
+    """Play a YouTube video."""
+    logger.info(f"Playing YouTube: {query}")
+
+    try:
+        result = play_youtube(query)
+        
+        if not result.get("success", False):
+            return {
+                "success": False,
+                "action": "play",
+                "error": result.get("error", "Unknown error"),
+                "query": query,
+            }
+        
+        return {
+            "success": True,
+            "action": "play",
+            "query": query,
+            "video_title": result.get("video_title", ""),
+            "screenshot": result.get("screenshot_b64", ""),
+        }
+    except Exception as exc:
+        logger.error(f"Play failed: {exc}")
+        return {
+            "success": False,
+            "action": "play",
+            "error": str(exc),
+            "query": query,
+        }
+
+
+def _action_play_song(song_name: str) -> dict[str, Any]:
+    """Play a song on YouTube."""
+    logger.info(f"Playing song: {song_name}")
+
+    try:
+        result = play_song(song_name)
+        
+        if not result.get("success", False):
+            return {
+                "success": False,
+                "action": "play_song",
+                "error": result.get("error", "Unknown error"),
+                "song": song_name,
+            }
+        
+        return {
+            "success": True,
+            "action": "play_song",
+            "song": song_name,
+            "video_title": result.get("video_title", ""),
+            "screenshot": result.get("screenshot_b64", ""),
+        }
+    except Exception as exc:
+        logger.error(f"Play song failed: {exc}")
+        return {
+            "success": False,
+            "action": "play_song",
+            "error": str(exc),
+            "song": song_name,
         }
 
 
@@ -1140,6 +1350,195 @@ def _verify_with_vision(
         "confidence": 0.0,
         "verified": True,  # Allow continuation, but mark as unverified
     }
+
+
+@app.route("/task", methods=["POST"])
+def task() -> dict[str, Any]:
+    """
+    Convert voice command to action steps and execute them.
+    
+    Accepts:
+    {
+        "command": "open chrome and search for python",
+        "user": "voice",
+        "channel": "voice"
+    }
+    
+    Returns:
+    {
+        "success": bool,
+        "steps_completed": int,
+        "total_steps": int,
+        "actions": [
+            {"action": "open_app", "target": "chrome", "status": "success"},
+            ...
+        ],
+        "screenshot": base64_string,
+        "message": "Completed N of N steps"
+    }
+    """
+    try:
+        data = request.get_json() or {}
+        command = data.get("command", "").strip()
+        user = data.get("user", "voice")
+        channel = data.get("channel", "voice")
+
+        logger.info(f"Task request: command='{command[:50]}...', user={user}, channel={channel}")
+
+        if not command:
+            return jsonify({
+                "success": False,
+                "error": "command is required",
+            }), 400
+
+        # Step 1: Convert command to action steps via Ollama llama3
+        logger.info("Converting voice command to action steps via Ollama llama3")
+
+        system_prompt = """You are a Windows PC automation system. Convert natural language commands to a JSON array of actions.
+
+Each action must have: action, target (optional), value (optional)
+
+Supported actions:
+- open_app: {action: "open_app", target: "app_name"}
+- type: {action: "type", value: "text"}
+- press_key: {action: "press_key", value: "key_name" or "key1+key2"}
+- click: {action: "click", value: "x,y"} or {action: "click", value: "target:element_name"}
+- screenshot: {action: "screenshot"}
+- wait: {action: "wait", value: "seconds"}
+- browse: {action: "browse", target: "url"}
+- search: {action: "search", value: "query"}
+- summarize: {action: "summarize", target: "url"}
+- play: {action: "play", value: "video_query"}
+- play_song: {action: "play_song", value: "song_name"}
+
+Examples:
+- "open chrome and search for python" → [{"action": "open_app", "target": "chrome"}, {"action": "wait", "value": "2"}, {"action": "search", "value": "python"}]
+- "play the song thriller" → [{"action": "play_song", "value": "thriller"}]
+- "take a screenshot" → [{"action": "screenshot"}]
+
+IMPORTANT: Return ONLY valid JSON array, no extra text. If unclear, return best guess."""
+
+        try:
+            response = requests.post(
+                "http://localhost:11434/api/generate",
+                json={
+                    "model": "llama3",
+                    "prompt": f"System prompt: {system_prompt}\n\nUser command: {command}\n\nReturn ONLY the JSON array of actions, no extra text.",
+                    "stream": False,
+                },
+                timeout=30,
+            )
+
+            if response.status_code != 200:
+                logger.error(f"Ollama request failed: {response.status_code}")
+                return jsonify({
+                    "success": False,
+                    "error": f"Ollama connection failed: {response.status_code}",
+                }), 500
+
+            ollama_response = response.json().get("response", "[]")
+            logger.debug(f"Ollama response: {ollama_response[:200]}")
+
+            # Extract JSON from response
+            try:
+                # Find JSON array in response
+                start = ollama_response.find("[")
+                end = ollama_response.rfind("]") + 1
+                if start >= 0 and end > start:
+                    json_str = ollama_response[start:end]
+                    actions = json.loads(json_str)
+                else:
+                    actions = json.loads(ollama_response)
+
+                if not isinstance(actions, list):
+                    actions = [actions]
+
+                logger.info(f"Parsed {len(actions)} action steps from command")
+
+            except json.JSONDecodeError as e:
+                logger.error(f"Failed to parse Ollama JSON response: {e}")
+                logger.debug(f"Response was: {ollama_response}")
+                return jsonify({
+                    "success": False,
+                    "error": f"Failed to parse action steps: {str(e)}",
+                }), 500
+
+        except requests.exceptions.RequestException as e:
+            logger.error(f"Ollama connection error: {e}")
+            return jsonify({
+                "success": False,
+                "error": "Ollama not running on localhost:11434",
+            }), 503
+
+        # Step 2: Execute each action
+        executed_actions = []
+        steps_completed = 0
+
+        for idx, action_spec in enumerate(actions):
+            if not isinstance(action_spec, dict):
+                logger.warning(f"Skipping invalid action spec: {action_spec}")
+                continue
+
+            action = action_spec.get("action", "").strip()
+            target = action_spec.get("target", "").strip()
+            value = action_spec.get("value", "").strip()
+
+            if not action:
+                logger.warning(f"Skipping action without 'action' field")
+                continue
+
+            logger.info(f"Executing step {idx + 1}/{len(actions)}: {action}")
+
+            # Execute the action
+            result = _execute_action(action, target, value)
+
+            executed_actions.append({
+                "step": idx + 1,
+                "action": action,
+                "target": target or None,
+                "value": value or None,
+                "status": "success" if result.get("success") else "failed",
+                "error": result.get("error") if not result.get("success") else None,
+            })
+
+            if result.get("success"):
+                steps_completed += 1
+
+            # Log to audit
+            if _audit_logger:
+                _audit_logger.log(
+                    user_id=user,
+                    action=action,
+                    target=target or "",
+                    allowed=result.get("success", False),
+                    reason=f"Voice command step {idx + 1}: {command[:50]}",
+                )
+
+            # Small delay between actions
+            time.sleep(0.5)
+
+        # Step 3: Capture final screenshot
+        screenshot_b64 = _capture_screenshot()
+
+        # Step 4: Return results
+        logger.info(f"Task completed: {steps_completed}/{len(actions)} steps")
+
+        return jsonify({
+            "success": steps_completed == len(actions),
+            "steps_completed": steps_completed,
+            "total_steps": len(actions),
+            "actions": executed_actions,
+            "screenshot": screenshot_b64 or "",
+            "message": f"Completed {steps_completed} of {len(actions)} steps",
+            "command": command,
+        }), 200
+
+    except Exception as exc:
+        logger.error(f"Task endpoint error: {exc}", exc_info=True)
+        return jsonify({
+            "success": False,
+            "error": str(exc),
+        }), 500
 
 
 def _cleanup_expired_tokens() -> None:
