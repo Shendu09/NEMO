@@ -20,6 +20,22 @@ Pillow>=10.0.0
 requests>=2.31.0
 RealtimeSTT>=0.0.23
 
+# Vision: OmniParser (AI-powered UI element detection)
+torch>=2.0.0
+torchvision>=0.15.0
+transformers>=4.30.0
+timm>=0.9.0
+einops>=0.7.0
+
+# Voice: faster-whisper for speech recognition
+faster-whisper>=0.10.0
+sounddevice>=0.4.6
+numpy>=1.24.0
+
+# Browser: Playwright for web automation
+playwright>=1.40.0
+nest-asyncio>=1.5.8
+
 # Web: Flask for OpenClaw bridge
 Flask>=3.0.0
 
