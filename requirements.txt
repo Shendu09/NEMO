@@ -45,9 +45,11 @@ numpy>=1.24.0
 # NLP: Intent matching with sentence embeddings (semantic understanding of voice commands)
 sentence-transformers>=2.2.0
 
-# AI Inference Optimization: ONNX Runtime + DirectML
-onnxruntime>=1.17.0
-onnxruntime-directml>=1.17.0
+# AI Inference Optimization: ONNX Runtime (GPU accelerated)
+onnxruntime-gpu>=1.17.0
+
+# GPU Monitoring
+nvidia-ml-py>=12.0.0
 
 # Browser: Playwright for web automation
 playwright>=1.40.0

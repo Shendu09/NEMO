@@ -2,10 +2,16 @@
 
 from __future__ import annotations
 
+import os
+import sys
+
+# PaddleOCR environment fixes (disable oneDNN, disable model source check)
+os.environ["FLAGS_use_mkldnn"] = "0"
+os.environ["PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK"] = "True"
+
 import argparse
 import logging
 import platform
-import sys
 import threading
 import time
 from pathlib import Path
@@ -95,6 +101,23 @@ def cmd_run(task: str = None) -> int:
         time.sleep(2.0)  # Give Flask time to bind and start listening
         logger.info("      ✓ HTTP API ready on :8765")
 
+        # 3.5. Warm up DistilBART summarizer in background (cold-start optimization)
+        # This prevents the 1GB model from being loaded on first summarize request
+        logger.info("[3.5/6] Pre-warming DistilBART summarizer...")
+        def warmup_summarizer():
+            try:
+                from bridge.nemo_server import _get_summarizer
+                summarizer = _get_summarizer()
+                if summarizer:
+                    logger.info("      ✓ DistilBART model cached in memory")
+                else:
+                    logger.warning("      ⚠ DistilBART warmup skipped (not available)")
+            except Exception as e:
+                logger.debug(f"      ⚠ Summarizer warmup failed (non-critical): {e}")
+        
+        warmup_thread = threading.Thread(target=warmup_summarizer, daemon=True)
+        warmup_thread.start()
+
         # 4. Start Voice Listener
         logger.info("[4/6] Starting Voice Listener...")
         try:
@@ -127,7 +150,7 @@ def cmd_run(task: str = None) -> int:
             logger.warning(f"      ⚠ Voice listener failed to start (optional): {e}")
 
         # 5. Start Health Monitor
-        logger.info("[5/6] Starting Health Monitor...")
+        logger.info("[5/7] Starting Health Monitor...")
         try:
             from core.service.health_monitor import HealthMonitor
             from core.service.config import ServiceConfig
@@ -152,7 +175,7 @@ def cmd_run(task: str = None) -> int:
             health_monitor = None
 
         # 6. Print startup banner
-        logger.info("[6/6] System startup complete")
+        logger.info("[6/7] System startup complete")
         
         print("\n")
         print("╔══════════════════════════════════════╗")

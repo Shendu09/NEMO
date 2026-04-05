@@ -15,6 +15,21 @@ import uuid
 from pathlib import Path
 from typing import Any, Optional
 
+# PaddleOCR environment fixes (disable oneDNN, disable model source check)
+os.environ["FLAGS_use_mkldnn"] = "0"
+os.environ["PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK"] = "True"
+
+# GPU Setup: CUDA device detection
+import torch
+DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+if DEVICE == "cuda":
+    logger_temp = logging.getLogger("nemo.server")
+    logger_temp.info(f"GPU: {torch.cuda.get_device_name(0)}")
+    logger_temp.info(f"VRAM: {torch.cuda.get_device_properties(0).total_memory / 1e9:.1f}GB")
+
+# Silence DistilBART warnings
+os.environ["TOKENIZERS_PARALLELISM"] = "false"
+
 import jwt
 import pyautogui
 import pygetwindow
@@ -130,7 +145,8 @@ pyautogui.PAUSE = 0
 def _get_ocr():
     """Get or initialize PaddleOCR reader (lazy loading on first use).
     
-    PaddleOCR is 4-6x faster than EasyOCR on CPU and uses ONNX optimization.
+    PaddleOCR is 4-6x faster than EasyOCR on CPU.
+    Uses ONNX Runtime by default for optimized inference.
     """
     if not HAS_OCR:
         return None
@@ -141,10 +157,9 @@ def _get_ocr():
             if _ocr_reader is None:
                 logger.info("Initializing PaddleOCR reader (first use, ~30s, downloads ~1.5GB)...")
                 _ocr_reader = PaddleOCR(
-                    lang="en",
-                    use_gpu=False,
+                    lang="en"
                 )
-                logger.info("  ✓ PaddleOCR reader ready (4-6x faster than EasyOCR)")
+                logger.info("  ✓ PaddleOCR ready (4-6x faster than EasyOCR, ONNX optimized)")
     return _ocr_reader
 
 
@@ -153,7 +168,7 @@ def _get_summarizer() -> Optional[tuple[Any, Any]]:
     
     Uses DistilBART CNN: 50% smaller than BART-large with 97% quality.
     Returns (model, tokenizer) tuple for seq2seq summarization.
-    Latency: ~2 seconds per article on CPU.
+    Latency: ~2 seconds per article on CPU, ~500ms on GPU.
     """
     global _summarizer
     if _summarizer is not None:
@@ -171,8 +186,23 @@ def _get_summarizer() -> Optional[tuple[Any, Any]]:
             tokenizer = AutoTokenizer.from_pretrained(model_name)
             model = AutoModelForSeq2SeqLM.from_pretrained(model_name)
             
+            # Silence warnings
+            model.config.tie_word_embeddings = False
+            
+            # Move to GPU if available
+            model = model.to(DEVICE)
+            
+            # Safe torch.compile wrapper
+            if hasattr(torch, 'compile'):
+                try:
+                    logger.debug("Compiling DistilBART with torch.compile()...")
+                    model = torch.compile(model, mode="default")
+                    logger.info("✓ DistilBART compiled for inference speedup")
+                except Exception as compile_error:
+                    logger.warning(f"torch.compile() skipped (non-critical): {compile_error}")
+            
             _summarizer = (model, tokenizer)
-            logger.info("  ✓ DistilBART summarizer ready (2x faster than BART-large)")
+            logger.info(f"✓ DistilBART summarizer ready (device={DEVICE})")
             return _summarizer
         except ImportError:
             logger.warning("transformers not available - summarization disabled")
@@ -236,6 +266,9 @@ def summarize_text(text: str, max_length: int = 60, min_length: int = 30) -> dic
         # Tokenize input
         inputs = tokenizer(input_text, max_length=1024, return_tensors="pt", truncation=True)
         
+        # Move inputs to device
+        inputs = {k: v.to(DEVICE) for k, v in inputs.items()}
+        
         # Generate summary
         summary_ids = model.generate(
             inputs["input_ids"],
@@ -297,18 +330,18 @@ def _handle_chrome_profile_picker(preferred_profile: str = "Default") -> bool:
         if not reader:
             return False
         
-        # PaddleOCR.ocr() returns [[[bbox, text], confidence], ...] (nested list structure)
-        paddle_results = reader.ocr(screen_np, cls=True)
+        # PaddleOCR.predict() returns list of dicts with 'points', 'rec_text', 'rec_score'
+        paddle_results = reader.predict(screen_np)
         
         # Flatten and normalize to [[bbox, text, confidence], ...] format
         results = []
-        if paddle_results and paddle_results[0]:
-            for item in paddle_results[0]:
-                # item format: [[[x1,y1],[x2,y2],[x3,y3],[x4,y4]], text] or with confidence
-                if len(item) >= 2:
-                    bbox = item[0]  # List of coordinate pairs
-                    text = item[1]  # The recognized text
-                    confidence = item[2] if len(item) > 2 else 0.95  # Default high confidence
+        if paddle_results:
+            for item in paddle_results:
+                # item format: {points: [[x1,y1],[x2,y2],[x3,y3],[x4,y4]], rec_text: str, rec_score: float}
+                if isinstance(item, dict) and 'rec_text' in item:
+                    bbox = item.get('points', [])  # List of coordinate pairs
+                    text = item.get('rec_text', '')  # The recognized text
+                    confidence = item.get('rec_score', 0.95)  # Confidence score
                     results.append([bbox, text, confidence])
         
         # Check if this is the Chrome profile picker

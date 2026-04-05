@@ -12,6 +12,10 @@ import logging
 import threading
 from typing import Any, Callable, Optional
 
+# GPU Setup: CUDA detection for faster-whisper
+import torch
+DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+
 logger = logging.getLogger("nemo.voice")
 
 # Models will be loaded lazily on first use
@@ -54,7 +58,10 @@ def _get_vad_model() -> Optional[Any]:
 
 
 def _get_whisper_model() -> Optional[Any]:
-    """Load faster-whisper model (lazy, thread-safe)."""
+    """Load faster-whisper model (lazy, thread-safe).
+    
+    Uses CUDA GPU if available (float16 for speed), falls back to CPU with int8 quantization.
+    """
     global _whisper_model
     
     if _whisper_model is not None:
@@ -68,16 +75,26 @@ def _get_whisper_model() -> Optional[Any]:
             logger.info("Loading faster-whisper 'small' model...")
             from faster_whisper import WhisperModel
             
-            # Load small model on CPU with int8 quantization
-            model = WhisperModel(
-                "small",
-                device="cpu",
-                compute_type="int8",
-                num_workers=1,
-            )
+            # Use GPU if available
+            if DEVICE == "cuda":
+                logger.info("Loading faster-whisper on CUDA (float16 precision)...")
+                model = WhisperModel(
+                    "small",
+                    device="cuda",
+                    compute_type="float16",
+                    num_workers=1,
+                )
+            else:
+                logger.info("Loading faster-whisper on CPU (int8 quantization)...")
+                model = WhisperModel(
+                    "small",
+                    device="cpu",
+                    compute_type="int8",
+                    num_workers=1,
+                )
             
             _whisper_model = model
-            logger.info("✓ Faster-whisper model loaded")
+            logger.info(f"✓ Faster-whisper model loaded on {DEVICE}")
             return model
             
         except ImportError:

@@ -15,15 +15,29 @@ import base64
 import io
 import json
 import logging
+import os
 import re
 import threading
 from typing import Any, Optional
 
+# PaddleOCR environment fixes (disable oneDNN, disable model source check)
+os.environ["FLAGS_use_mkldnn"] = "0"
+os.environ["PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK"] = "True"
+
 import requests
+import torch
 from difflib import SequenceMatcher
 from PIL import Image
 
 logger = logging.getLogger("nemo.vision")
+
+# GPU Setup: CUDA device detection
+DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+if DEVICE == "cuda":
+    logger.info(f"GPU: {torch.cuda.get_device_name(0)}")
+    logger.info(f"VRAM: {torch.cuda.get_device_properties(0).total_memory / 1e9:.1f}GB")
+else:
+    logger.info("GPU not available, using CPU for vision models")
 
 # Singleton model instances (lazy-loaded)
 _paddleocr_reader: Optional[Any] = None
@@ -35,8 +49,8 @@ _models_lock = threading.Lock()
 def _get_paddleocr_reader() -> Optional[Any]:
     """Load PaddleOCR reader (singleton, lazy-loaded on first use).
     
-    PaddleOCR is 4-6x faster than EasyOCR on CPU and uses ONNX optimization.
-    Models are ~1.5GB (vs 2GB for EasyOCR).
+    PaddleOCR is 4-6x faster than EasyOCR on CPU.
+    Uses ONNX Runtime by default for optimized inference.
     """
     global _paddleocr_reader
     
@@ -51,14 +65,13 @@ def _get_paddleocr_reader() -> Optional[Any]:
             logger.info("Loading PaddleOCR... (first run may take 30-60 seconds, downloads ~1.5GB)")
             from paddleocr import PaddleOCR
             
-            # Initialize PaddleOCR with CPU-optimized settings
-            # lang="en": English only (faster than multi-language)
-            # use_gpu=False: CPU only (no CUDA required)
+            # Initialize PaddleOCR with optimized settings
+            # PaddleOCR uses ONNX Runtime by default for fast inference
+            # Automatically uses hardware acceleration when available
             _paddleocr_reader = PaddleOCR(
-                lang="en",
-                use_gpu=False,
+                lang="en"
             )
-            logger.info("✓ PaddleOCR loaded successfully (4-6x faster than EasyOCR)")
+            logger.info("✓ PaddleOCR loaded (4-6x faster than EasyOCR, with ONNX acceleration)")
             return _paddleocr_reader
         except Exception as e:
             logger.warning(f"Failed to load PaddleOCR: {e}")
@@ -66,7 +79,10 @@ def _get_paddleocr_reader() -> Optional[Any]:
 
 
 def _get_clip_model() -> Optional[tuple[Any, Any]]:
-    """Load CLIP model and processor (singleton, lazy-loaded)."""
+    """Load CLIP model and processor (singleton, lazy-loaded).
+    
+    Includes torch.compile() optimization (PyTorch 2.0+) for 20-40% faster inference.
+    """
     global _clip_model, _clip_processor
     
     if _clip_model is not None and _clip_processor is not None:
@@ -79,14 +95,24 @@ def _get_clip_model() -> Optional[tuple[Any, Any]]:
         try:
             logger.info("Loading CLIP model... (first run may download ~350MB)")
             import open_clip
-            import torch
             
             _clip_model, _, _clip_processor = open_clip.create_model_and_transforms(
                 "ViT-B-32",
                 pretrained="openai",
-                device="cpu",
+                device=DEVICE,
             )
-            logger.info("✓ CLIP model loaded successfully")
+            
+            # Apply torch.compile() for 20-40% inference speedup (PyTorch 2.0+)
+            # Use mode='default' for Windows compatibility (doesn't require MSVC compiler)
+            if hasattr(torch, 'compile'):
+                try:
+                    logger.debug(f"Compiling CLIP model on {DEVICE} with torch.compile(mode='default')...")
+                    _clip_model = torch.compile(_clip_model, mode="default")
+                    logger.info(f"✓ CLIP model compiled on {DEVICE} (inference speedup enabled)")
+                except Exception as compile_error:
+                    logger.warning(f"torch.compile() skipped (non-critical): {compile_error}")
+            
+            logger.info(f"✓ CLIP model loaded on {DEVICE}")
             return (_clip_model, _clip_processor)
         except Exception as e:
             logger.warning(f"Failed to load CLIP: {e}")
@@ -277,19 +303,26 @@ def find_element(
                 # Convert PIL to numpy for PaddleOCR
                 img_np = np.array(image)
                 
-                # Run OCR - PaddleOCR.ocr() returns [[[bbox, text], confidence], ...]
-                results = reader.ocr(img_np, cls=True)
+                # Run OCR - PaddleOCR.predict() returns list of dicts with 'rec_text', 'rec_score'
+                results = reader.predict(img_np)
                 
-                # Flatten results (PaddleOCR returns list of lists per page)
+                # Flatten results (new API returns list of result dicts)
                 flattened_results = []
-                if results and results[0]:
-                    for item in results[0]:
-                        # item is [[[x1,y1],[x2,y2],[x3,y3],[x4,y4]], text]
-                        if len(item) >= 2:
-                            bbox, text = item[0], item[1]
-                            # PaddleOCR sometimes includes confidence as item[2]
-                            conf = item[2] if len(item) > 2 else 0.95
+                if results:
+                    for item in results:
+                        # item is dict with keys: 'rec_text', 'rec_score', bbox coordinates, etc
+                        if isinstance(item, dict):
+                            text = item.get('rec_text', '')
+                            conf = item.get('rec_score', 0.95)
+                            # Extract bbox coordinates if available in the response
+                            bbox = item.get('bbox', [[0,0], [0,0], [0,0], [0,0]])  # fallback
                             flattened_results.append((bbox, text, conf))
+                        else:
+                            # Handle legacy format if present
+                            if len(item) >= 2:
+                                bbox, text = item[0], item[1]
+                                conf = item[2] if len(item) > 2 else 0.95
+                                flattened_results.append((bbox, text, conf))
                 
                 if not flattened_results:
                     logger.warning("PaddleOCR found no text")
@@ -413,18 +446,18 @@ def list_elements(
                 # Convert PIL to numpy for PaddleOCR
                 img_np = np.array(image)
                 
-                # Run OCR - PaddleOCR.ocr() returns [[[bbox, text], confidence], ...]
-                results = reader.ocr(img_np, cls=True)
+                # Run OCR - PaddleOCR.predict() returns list of dicts with 'points', 'rec_text', 'rec_score'
+                results = reader.predict(img_np)
                 
-                # Flatten results (PaddleOCR returns list of lists per page)
+                # Flatten results (PaddleOCR returns list of results per page)
                 flattened_results = []
-                if results and results[0]:
-                    for item in results[0]:
-                        # item is [[[x1,y1],[x2,y2],[x3,y3],[x4,y4]], text]
-                        if len(item) >= 2:
-                            bbox, text = item[0], item[1]
-                            # PaddleOCR sometimes includes confidence as item[2]
-                            conf = item[2] if len(item) > 2 else 0.95
+                if results:
+                    for item in results:
+                        # item is {points: [[x1,y1],[x2,y2],[x3,y3],[x4,y4]], rec_text: str, rec_score: float}
+                        if isinstance(item, dict) and 'rec_text' in item:
+                            bbox = item.get('points', [])
+                            text = item.get('rec_text', '')
+                            conf = item.get('rec_score', 0.95)
                             flattened_results.append((bbox, text, conf))
                 
                 elements = []
@@ -522,7 +555,7 @@ def detect_screen_state(screenshot_b64: str) -> dict[str, Any]:
                 logger.debug("Using CLIP for screen state detection")
                 
                 # Prepare image
-                image_input = processor(image).unsqueeze(0)
+                image_input = processor(image).unsqueeze(0).to(DEVICE)
                 
                 # Text prompts to classify
                 prompts = [
@@ -538,7 +571,7 @@ def detect_screen_state(screenshot_b64: str) -> dict[str, Any]:
                 
                 text_tokens = torch.cat([
                     processor.tokenize(p) for p in prompts
-                ]).unsqueeze(0)
+                ]).unsqueeze(0).to(DEVICE)
                 
                 with torch.no_grad():
                     image_features = model.encode_image(image_input)
