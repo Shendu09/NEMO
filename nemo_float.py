@@ -40,7 +40,7 @@ def main():
     print("🐠 NEMO Floating Agent starting...")
     print(f"   HTML: {html_path}")
     print("   Position: Bottom-right corner")
-    print("   Window: Transparent, always-on-top, draggable")
+    print("   Window: Transparent, frameless, draggable")
     print("")
     
     # Create and show the window
@@ -51,15 +51,27 @@ def main():
         height=500,
         background_color='#00000000',  # Fully transparent
         frameless=True,  # No window frame
-        always_on_top=True,  # Always visible
         transparent=True,  # Transparent background
     )
     
-    # Position at bottom-right (approximately)
-    # Note: Positioning may need adjustment based on screen size
-    # This is handled in JS with pywebview API
+    # Position at bottom-right and set always-on-top after creation
+    def on_ready():
+        """Called when window is ready."""
+        # Set always-on-top flag using pywebview API
+        try:
+            import ctypes
+            hwnd = window.uid  # Window handle
+            # Set WS_EX_TOPMOST flag (0x8 << 20 = 0x80000)
+            ctypes.windll.user32.SetWindowPos(
+                hwnd, -1, 0, 0, 0, 0,
+                0x0001 | 0x0002  # SWP_NOSIZE | SWP_NOMOVE
+            )
+        except:
+            pass  # Graceful fallback if setting always-on-top fails
     
+    window.events.ready += on_ready
     webview.start(debug=False)
+
 
 
 if __name__ == "__main__":
