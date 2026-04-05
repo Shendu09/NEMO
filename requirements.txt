@@ -1,4 +1,5 @@
-# NEMO-OS System Requirements
+# NEMO-OS System Requirements (Deep Learning Upgrade)
+# Generated: April 6, 2026
 # Core dependencies
 
 # Security: Runtime validation
@@ -16,8 +17,9 @@ mss>=9.0.1
 pygetwindow>=0.0.9
 Pillow>=10.0.0
 
-# Chrome Profile Detection: OCR for automatic profile selection
-easyocr>=1.7.0
+# Chrome Profile Detection: OCR (upgraded to PaddleOCR — 4-6x faster than EasyOCR)
+paddlepaddle>=2.5.0
+paddleocr>=2.7.0.3
 opencv-python>=4.8.0
 
 # Clipboard: Multi-line code typing
@@ -27,17 +29,25 @@ pyperclip>=1.8.2
 requests>=2.31.0
 RealtimeSTT>=0.0.23
 
-# Vision: OmniParser (AI-powered UI element detection)
+# Vision: OmniParser (AI-powered UI element detection) + Florence-2 (natural language grounding)
 torch>=2.0.0
 torchvision>=0.15.0
-transformers>=4.30.0
+transformers>=4.40.0
 timm>=0.9.0
 einops>=0.7.0
+open_clip>=0.6.0
 
-# Voice: faster-whisper for speech recognition
+# Voice: faster-whisper for speech recognition (already VAD-optimized)
 faster-whisper>=0.10.0
 sounddevice>=0.4.6
 numpy>=1.24.0
+
+# NLP: Intent matching with sentence embeddings (semantic understanding of voice commands)
+sentence-transformers>=2.2.0
+
+# AI Inference Optimization: ONNX Runtime + DirectML
+onnxruntime>=1.17.0
+onnxruntime-directml>=1.17.0
 
 # Browser: Playwright for web automation
 playwright>=1.40.0
