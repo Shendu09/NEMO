@@ -38,9 +38,23 @@ except ImportError:
 from core.security.gateway_v2 import SecurityGateway
 from core.security.audit_logger_v2 import AuditLogger
 from core.security.action_classifier import classify, RiskLevel
-from core.vision.omniparser_vision import find_element
-from core.browser.web_agent import browse, search_web, summarize_page, play_youtube, play_song
 from flask import render_template
+
+# Safe imports with fallback for missing models
+find_element = None
+browse = search_web = summarize_page = play_youtube = play_song = None
+
+try:
+    from core.vision.omniparser_vision import find_element
+except Exception as _e:
+    logging.getLogger("nemo.imports").warning(f"OmniParser not loaded: {_e}")
+
+try:
+    from core.browser.web_agent import (
+        browse, search_web, summarize_page, play_youtube, play_song
+    )
+except Exception as _e:
+    logging.getLogger("nemo.imports").warning(f"Browser agent not loaded: {_e}")
 
 
 app = Flask(
@@ -891,6 +905,13 @@ def _action_click(coords: str) -> dict[str, Any]:
                     "error": "Failed to capture screenshot for element detection",
                 }
             
+            # Check if vision is available
+            if find_element is None:
+                return {
+                    "success": False,
+                    "error": "Vision model not available for element detection",
+                }
+            
             # Use OmniParser to find element
             result = find_element(screenshot_b64, target_name)
             
@@ -1566,8 +1587,8 @@ def task() -> dict[str, Any]:
                 "error": "command is required",
             }), 400
 
-        # Step 1: Convert command to action steps via Ollama llama3
-        logger.info("Converting voice command to action steps via Ollama llama3")
+        # Step 1: Convert command to action steps via Ollama Qwen2.5
+        logger.info("Converting voice command to action steps via Ollama Qwen2.5")
 
         system_prompt = """You are a Windows PC automation system. Convert natural language commands to a JSON array of actions.
 
@@ -1597,7 +1618,7 @@ IMPORTANT: Return ONLY valid JSON array, no extra text. If unclear, return best 
             response = requests.post(
                 "http://localhost:11434/api/generate",
                 json={
-                    "model": "llama3",
+                    "model": "qwen2.5:7b",
                     "prompt": f"System prompt: {system_prompt}\n\nUser command: {command}\n\nReturn ONLY the JSON array of actions, no extra text.",
                     "stream": False,
                 },

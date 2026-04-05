@@ -181,32 +181,122 @@ class ActionExecutor:
             raise ValueError(f"Unknown action: {step.action}")
 
     def _action_open_app(self, app_name: str, args: str = "") -> dict[str, Any]:
-        """Open an application."""
-        self.logger.info(f"Opening app: {app_name}")
-
-        cmd = app_name
-        if app_name.lower() == "chrome":
-            cmd = (
-                "chrome"
-                if subprocess.run(
-                    ["which", "chrome"],
-                    capture_output=True,
-                ).returncode == 0
-                else "google-chrome"
-            )
-            cmd += " --profile-directory=Default --no-first-run --start-maximized"
-
+        """Open an application on Windows."""
+        import shutil, os
+        app_lower = app_name.lower().strip()
+        self.logger.info(f"Opening app: {app_lower}")
+        
+        SPECIAL_PATHS = {
+            "chrome": [
+                r"C:\Program Files\Google\Chrome\Application\chrome.exe",
+                r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
+            ],
+            "edge": [
+                r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe",
+            ],
+            "whatsapp": [
+                os.path.expandvars(r"%LOCALAPPDATA%\WhatsApp\WhatsApp.exe"),
+                os.path.expandvars(r"%APPDATA%\WhatsApp\WhatsApp.exe"),
+            ],
+            "notepad": [r"C:\Windows\System32\notepad.exe"],
+        }
+        
+        exe_path = None
+        if app_lower in SPECIAL_PATHS:
+            for p in SPECIAL_PATHS[app_lower]:
+                if os.path.isfile(p):
+                    exe_path = p
+                    break
+        
+        if not exe_path:
+            exe_path = shutil.which(app_lower) or shutil.which(app_lower + ".exe")
+        
         try:
-            subprocess.Popen(cmd, shell=True)
+            if exe_path:
+                if app_lower == "chrome":
+                    cmd = [exe_path, "--profile-directory=Default",
+                           "--no-first-run", "--start-maximized"]
+                else:
+                    cmd = [exe_path]
+                subprocess.Popen(cmd, creationflags=0x00000008)
+            else:
+                import ctypes
+                ctypes.windll.shell32.ShellExecuteW(
+                    None, "open", app_lower, None, None, 1)
+            
+            time.sleep(2)
+            
+            # If Chrome launched, use CLIP to detect profile picker and handle it
+            if app_lower == "chrome":
+                self._handle_chrome_profile_picker()
+            
             self.logger.info(f"Opened: {app_name}")
-            return {
-                "action": "open_app",
-                "app": app_name,
-                "success": True,
-            }
+            return {"action": "open_app", "app": app_name, "success": True}
         except Exception as exc:
             self.logger.error(f"Failed to open {app_name}: {exc}")
-            raise
+            return {"success": False, "error": str(exc), "app": app_name}
+
+    def _handle_chrome_profile_picker(self) -> None:
+        """
+        Handle Chrome profile picker using CLIP-based screen state detection.
+        
+        If Chrome opens a profile selector screen, this function will detect it
+        using CLIP and click the Default profile to proceed.
+        """
+        try:
+            # Import vision module
+            from core.vision.omniparser_vision import detect_screen_state, find_element
+            import pyautogui
+            import base64
+            
+            # Wait for Chrome to fully load
+            time.sleep(3)
+            
+            # Take screenshot
+            screenshot = pyautogui.screenshot()
+            screenshot_bytes = io.BytesIO()
+            screenshot.save(screenshot_bytes, format="PNG")
+            screenshot_b64 = base64.b64encode(screenshot_bytes.getvalue()).decode()
+            
+            # Detect screen state using CLIP
+            screen_state = detect_screen_state(screenshot_b64)
+            self.logger.debug(f"Chrome screen state: {screen_state}")
+            
+            # If profile picker detected, click Default profile
+            if screen_state.get("is_profile_picker", False):
+                self.logger.info("Chrome profile picker detected, selecting Default profile")
+                
+                # Try EasyOCR first to find "Default" profile
+                try:
+                    result = find_element(screenshot_b64, "Default")
+                    if result.get("found"):
+                        x, y = result["x"], result["y"]
+                        self.logger.info(f"Found Default profile at ({x}, {y}), clicking...")
+                        pyautogui.click(x, y)
+                        time.sleep(2)
+                        self.logger.info("Clicked Default profile")
+                        return
+                except Exception as e:
+                    self.logger.warning(f"EasyOCR find_element failed: {e}")
+                
+                # Fallback: Click center of screen (usually where profile is)
+                self.logger.info("Using fallback click at center-left of screen")
+                screen_width = screenshot.width
+                screen_height = screenshot.height
+                
+                # Try clicking at position where Default profile typically appears
+                click_x = int(screen_width * 0.3)
+                click_y = int(screen_height * 0.5)
+                
+                pyautogui.click(click_x, click_y)
+                time.sleep(2)
+            else:
+                self.logger.debug("No profile picker detected, Chrome loading normally")
+        
+        except ImportError:
+            self.logger.debug("Vision module not available, skipping profile picker detection")
+        except Exception as e:
+            self.logger.warning(f"Profile picker detection failed: {e}, proceeding anyway")
 
     def _action_type(self, text: str) -> dict[str, Any]:
         """Type text into active window."""

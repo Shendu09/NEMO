@@ -92,7 +92,7 @@ def cmd_run(task: str = None) -> int:
             daemon=True,
         )
         http_thread.start()
-        time.sleep(0.5)  # Give server time to start
+        time.sleep(2.0)  # Give Flask time to bind and start listening
         logger.info("      ✓ HTTP API ready on :8765")
 
         # 4. Start Voice Listener

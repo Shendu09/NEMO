@@ -2,7 +2,8 @@
 Voice Wake Word Listener — Real-time speech recognition for NEMO.
 
 Listens for wake words ("V", "BE", "WE", etc.) and captures voice commands.
-Uses faster-whisper for CPU-efficient real-time transcription.
+Uses Silero VAD for CPU-efficient voice activity detection.
+Uses faster-whisper for transcription only when speech is detected.
 """
 
 from __future__ import annotations
@@ -13,18 +14,55 @@ from typing import Any, Callable, Optional
 
 logger = logging.getLogger("nemo.voice")
 
-# Model will be loaded lazily on first use
-_model: Optional[Any] = None
-_model_lock = threading.Lock()
+# Models will be loaded lazily on first use
+_vad_model: Optional[Any] = None
+_whisper_model: Optional[Any] = None
+_models_lock = threading.Lock()
 
 
-def _get_model():
-    """Load faster-whisper model (lazy, thread-safe)."""
-    global _model
+def _get_vad_model() -> Optional[Any]:
+    """Load Silero VAD model (lazy, thread-safe)."""
+    global _vad_model
     
-    with _model_lock:
-        if _model is not None:
-            return _model
+    if _vad_model is not None:
+        return _vad_model
+    
+    with _models_lock:
+        if _vad_model is not None:
+            return _vad_model
+        
+        try:
+            logger.info("Loading Silero VAD model...")
+            import torch
+            
+            # Load pretrained Silero VAD
+            vad = torch.hub.load(
+                repo_or_dir='snakers4/silero-vad',
+                model='silero_vad',
+                force_reload=False,
+                onnx=True,
+            )
+            
+            _vad_model = vad
+            logger.info("✓ Silero VAD model loaded")
+            return vad
+            
+        except Exception as e:
+            logger.warning(f"Failed to load Silero VAD: {e}")
+            logger.warning("Will transcribe all audio chunks (less efficient)")
+            return None
+
+
+def _get_whisper_model() -> Optional[Any]:
+    """Load faster-whisper model (lazy, thread-safe)."""
+    global _whisper_model
+    
+    if _whisper_model is not None:
+        return _whisper_model
+    
+    with _models_lock:
+        if _whisper_model is not None:
+            return _whisper_model
         
         try:
             logger.info("Loading faster-whisper 'small' model...")
@@ -35,27 +73,74 @@ def _get_model():
                 "small",
                 device="cpu",
                 compute_type="int8",
-                num_workers=1,  # Single worker for thread safety
+                num_workers=1,
             )
             
-            _model = model
+            _whisper_model = model
             logger.info("✓ Faster-whisper model loaded")
             return model
             
         except ImportError:
             logger.error("faster-whisper not installed. Run: pip install faster-whisper")
-            raise
+            return None
         except Exception as e:
-            logger.error(f"Failed to load model: {e}")
-            raise
+            logger.error(f"Failed to load whisper model: {e}")
+            return None
+
+
+def _detect_speech(audio_chunk: Any, vad_model: Any, sr: int = 16000) -> bool:
+    """
+    Detect if audio chunk contains speech using Silero VAD.
+    
+    Args:
+        audio_chunk: Audio numpy array (mono, 16000 Hz)
+        vad_model: Loaded Silero VAD model
+        sr: Sample rate (default 16000 Hz)
+    
+    Returns:
+        True if speech detected, False otherwise
+    """
+    try:
+        import torch
+        
+        # Convert to torch tensor
+        if not isinstance(audio_chunk, torch.Tensor):
+            audio_chunk = torch.from_numpy(audio_chunk).float()
+        
+        # Ensure correct shape and length
+        if audio_chunk.dim() > 1:
+            audio_chunk = audio_chunk.squeeze()
+        
+        # Silero VAD expects 16000 Hz audio
+        if sr != 16000:
+            import torchaudio
+            audio_chunk = torchaudio.functional.resample(
+                audio_chunk, orig_freq=sr, new_freq=16000
+            )
+        
+        # Run VAD
+        with torch.inference_mode():
+            pred = vad_model(audio_chunk, 16000)
+        
+        # pred is probability of speech (0-1)
+        speech_detected = pred > 0.5
+        
+        logger.debug(f"VAD confidence: {pred:.2f}, speech detected: {speech_detected}")
+        return bool(speech_detected)
+        
+    except Exception as e:
+        logger.warning(f"VAD inference failed: {e}, transcribing anyway")
+        return True  # Default to transcribing if VAD fails
 
 
 def listen_for_wake_word(callback: Callable[[str], None]) -> None:
     """
     Listen for wake words and process voice commands.
     
-    Records audio in 2-second chunks, transcribes with faster-whisper,
-    detects wake words, and calls callback with extracted command.
+    Records audio in 1-second chunks. For each chunk:
+    1. Detects speech using Silero VAD (CPU-efficient)
+    2. If speech detected, transcribes with faster-whisper
+    3. Looks for wake word and calls callback with command
     
     Wake words: "V", "BE", "WE", "B", "VI" (case-insensitive)
     
@@ -70,10 +155,12 @@ def listen_for_wake_word(callback: Callable[[str], None]) -> None:
         logger.error("sounddevice not installed. Run: pip install sounddevice numpy")
         return
     
-    try:
-        model = _get_model()
-    except Exception as e:
-        logger.error(f"Cannot start listener without model: {e}")
+    # Load models
+    vad_model = _get_vad_model()
+    whisper_model = _get_whisper_model()
+    
+    if whisper_model is None:
+        logger.error("Cannot start listener without whisper model")
         return
     
     logger.info("Voice listener started, waiting for V... command")
@@ -83,13 +170,13 @@ def listen_for_wake_word(callback: Callable[[str], None]) -> None:
     
     # Audio recording parameters
     sr = 16000  # Sample rate
-    duration = 2  # 2-second chunks
+    duration = 1  # 1-second chunks (VAD is more efficient with shorter windows)
     
     try:
         while True:
             try:
-                # Record 2-second audio chunk
-                logger.debug("Recording audio chunk...")
+                # Record 1-second audio chunk
+                logger.debug("Recording audio...")
                 audio = sd.rec(
                     int(sr * duration),
                     samplerate=sr,
@@ -98,14 +185,33 @@ def listen_for_wake_word(callback: Callable[[str], None]) -> None:
                 )
                 sd.wait()  # Wait for recording to finish
                 
-                # Flatten and convert to proper format
+                # Flatten
                 audio_data = audio.flatten()
                 
-                logger.debug(f"Audio recorded: {len(audio_data)} samples")
+                # Check for speech using Silero VAD
+                speech_detected = False
+                if vad_model is not None:
+                    speech_detected = _detect_speech(audio_data, vad_model, sr)
+                else:
+                    # If VAD unavailable, check if audio has significant energy
+                    import numpy as np
+                    rms = np.sqrt(np.mean(audio_data ** 2))
+                    speech_detected = rms > 0.01  # Threshold for voice
+                    logger.debug(f"RMS energy: {rms:.4f}, speech detected: {speech_detected}")
                 
-                # Transcribe with faster-whisper
-                logger.debug("Transcribing audio...")
-                segments, info = model.transcribe(audio_data, language="en")
+                if not speech_detected:
+                    logger.debug("No speech detected, skipping transcription")
+                    logger.info("Listening for V...")
+                    continue
+                
+                logger.debug("Speech detected, transcribing...")
+                
+                # Transcribe with faster-whisper only if speech detected
+                segments, info = whisper_model.transcribe(
+                    audio_data,
+                    language="en",
+                    condition_on_previous_text=False,
+                )
                 
                 # Convert segments to text
                 transcription = " ".join(segment.text for segment in segments)
@@ -136,7 +242,7 @@ def listen_for_wake_word(callback: Callable[[str], None]) -> None:
                         else:
                             logger.info("Cancelled (never mind)")
                 else:
-                    logger.debug("No speech detected")
+                    logger.debug("No speech content after transcription")
                 
                 logger.info("Listening for V...")
                 
