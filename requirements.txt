@@ -30,6 +30,7 @@ requests>=2.31.0
 RealtimeSTT>=0.0.23
 
 # Vision: OmniParser (AI-powered UI element detection) + Florence-2 (natural language grounding)
+# Florence-2 downloads from HuggingFace: microsoft/florence-2-base (~1GB)
 torch>=2.0.0
 torchvision>=0.15.0
 transformers>=4.40.0

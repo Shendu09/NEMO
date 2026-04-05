@@ -43,6 +43,8 @@ else:
 _paddleocr_reader: Optional[Any] = None
 _clip_model: Optional[Any] = None
 _clip_processor: Optional[Any] = None
+_florence2_model: Optional[Any] = None
+_florence2_processor: Optional[Any] = None
 _models_lock = threading.Lock()
 
 
@@ -119,6 +121,62 @@ def _get_clip_model() -> Optional[tuple[Any, Any]]:
             return None
 
 
+def _get_florence2_model() -> Optional[tuple[Any, Any]]:
+    """Load Florence-2 vision foundation model for natural language UI grounding.
+    
+    Florence-2 can understand natural language descriptions and locate UI elements.
+    Example: "the blue send button" → coordinates
+    
+    Model: microsoft/florence-2-base (~1GB, downloads on first use)
+    GPU acceleration: Full CUDA support
+    """
+    global _florence2_model, _florence2_processor
+    
+    if _florence2_model is not None and _florence2_processor is not None:
+        return (_florence2_model, _florence2_processor)
+    
+    with _models_lock:
+        if _florence2_model is not None and _florence2_processor is not None:
+            return (_florence2_model, _florence2_processor)
+        
+        try:
+            logger.info("Loading Florence-2 model... (first run downloads ~1GB)")
+            from transformers import AutoProcessor, AutoModelForCausalLM
+            
+            model_name = "microsoft/florence-2-base"
+            _florence2_processor = AutoProcessor.from_pretrained(
+                model_name,
+                trust_remote_code=True,
+            )
+            _florence2_model = AutoModelForCausalLM.from_pretrained(
+                model_name,
+                trust_remote_code=True,
+                torch_dtype=torch.float16 if DEVICE == "cuda" else torch.float32,
+            ).to(DEVICE)
+            
+            # Eval mode for inference
+            _florence2_model.eval()
+            
+            # Compile if possible
+            if hasattr(torch, 'compile'):
+                try:
+                    logger.debug(f"Compiling Florence-2 on {DEVICE}...")
+                    _florence2_model = torch.compile(_florence2_model, mode="default")
+                    logger.info(f"✓ Florence-2 compiled on {DEVICE}")
+                except Exception as compile_error:
+                    logger.warning(f"torch.compile() skipped for Florence-2: {compile_error}")
+            
+            logger.info(f"✓ Florence-2 loaded on {DEVICE} (natural language UI grounding)")
+            return (_florence2_model, _florence2_processor)
+            
+        except ImportError:
+            logger.warning("Florence-2 requires: pip install timm")
+            return None
+        except Exception as e:
+            logger.warning(f"Failed to load Florence-2: {e}")
+            return None
+
+
 def _fuzzy_match(target: str, labels: list[str]) -> tuple[str, float]:
     """
     Find best matching label using fuzzy string matching.
@@ -150,6 +208,133 @@ def _fuzzy_match(target: str, labels: list[str]) -> tuple[str, float]:
             best_label = label
     
     return (best_label, best_score)
+
+
+def find_element_by_description(
+    screenshot_b64: str,
+    description: str,
+    screen_width: Optional[int] = None,
+    screen_height: Optional[int] = None,
+) -> dict[str, Any]:
+    """
+    Find a UI element using Florence-2 natural language grounding.
+    
+    Florence-2 understands natural language descriptions and returns coordinates.
+    Example: "the blue send button" → {x: 1234, y: 567}
+    
+    Args:
+        screenshot_b64: Base64 encoded screenshot
+        description: Natural language description (e.g., "blue button", "search input")
+        screen_width: Screen width (auto-detect if None)
+        screen_height: Screen height (auto-detect if None)
+    
+    Returns:
+        {
+            "found": bool,
+            "x": int (center pixel x),
+            "y": int (center pixel y),
+            "description": str,
+            "confidence": float,
+        }
+    """
+    try:
+        logger.debug(f"Florence-2: Finding element: {description}")
+        
+        # Decode screenshot
+        try:
+            img_data = base64.b64decode(screenshot_b64)
+            image = Image.open(io.BytesIO(img_data))
+            image = image.convert("RGB")
+        except Exception as e:
+            logger.error(f"Failed to decode screenshot: {e}")
+            return {"found": False, "x": 0, "y": 0, "confidence": 0}
+        
+        # Auto-detect screen size if needed
+        if screen_width is None:
+            screen_width = image.width
+        if screen_height is None:
+            screen_height = image.height
+        
+        # Load Florence-2
+        florence_data = _get_florence2_model()
+        if florence_data is None:
+            logger.warning("Florence-2 not available, falling back to OCR")
+            return {"found": False, "x": 0, "y": 0, "confidence": 0}
+        
+        model, processor = florence_data
+        
+        import time
+        start = time.time()
+        
+        # Use Florence-2's object detection task
+        # Florence-2 task format: "<TASK_NAME>" followed by text prompt
+        task = "<OD>"  # Object Detection
+        prompt = f"{task} {description}"
+        
+        # Prepare inputs
+        inputs = processor(text=prompt, images=image, return_tensors="pt").to(DEVICE)
+        
+        # Generate
+        with torch.no_grad():
+            generated_ids = model.generate(
+                input_ids=inputs["input_ids"],
+                pixel_values=inputs["pixel_values"],
+                max_new_tokens=1024,
+                num_beams=3,
+            )
+        
+        # Decode output
+        generated_text = processor.batch_decode(generated_ids, skip_special_tokens=False)[0]
+        inference_time = (time.time() - start) * 1000
+        
+        logger.debug(f"Florence-2 output: {generated_text[:100]}...")
+        logger.debug(f"Florence-2 inference: {inference_time:.0f}ms")
+        
+        # Parse coordinates from Florence-2 output
+        # Florence-2 returns in format like: "<OD><loc_0><loc_1><loc_2><loc_3></OD>"
+        # Extract coordinate patterns (simplified parsing)
+        import re
+        coord_pattern = r'<loc_(\d+)>'
+        coords = re.findall(coord_pattern, generated_text)
+        
+        if len(coords) >= 4:
+            try:
+                # Florence-2 uses normalized coordinates (0-1000)
+                x1 = int(coords[0])
+                y1 = int(coords[1])
+                x2 = int(coords[2])
+                y2 = int(coords[3])
+                
+                # Convert to pixel coordinates
+                x_center = int((x1 + x2) / 2 * screen_width / 1000)
+                y_center = int((y1 + y2) / 2 * screen_height / 1000)
+                
+                # Clamp to screen boundaries
+                x_center = max(0, min(x_center, screen_width))
+                y_center = max(0, min(y_center, screen_height))
+                
+                confidence = 0.85  # Florence-2 base confidence
+                
+                logger.info(f"✓ Found element at ({x_center}, {y_center}) via Florence-2")
+                return {
+                    "found": True,
+                    "x": x_center,
+                    "y": y_center,
+                    "description": description,
+                    "confidence": confidence,
+                    "method": "florence-2",
+                }
+            except (IndexError, ValueError) as e:
+                logger.warning(f"Failed to parse Florence-2 coordinates: {e}")
+        
+        logger.warning(f"Florence-2 couldn't locate: {description}")
+        return {"found": False, "x": 0, "y": 0, "confidence": 0}
+        
+    except Exception as e:
+        logger.error(f"Florence-2 error: {e}")
+        import traceback
+        traceback.print_exc()
+        return {"found": False, "x": 0, "y": 0, "confidence": 0}
 
 
 def _call_ollama_vision(
@@ -346,7 +531,22 @@ def find_element(
                 matched_label, match_score = _fuzzy_match(target, labels)
                 
                 if match_score < 0.3:  # Low confidence match
-                    logger.warning(f"Low match confidence: {match_score}")
+                    logger.warning(f"Low PaddleOCR match confidence: {match_score}")
+                    logger.info("Attempting Florence-2 fallback...")
+                    
+                    # Try Florence-2 for low-confidence matches
+                    florence_result = find_element_by_description(
+                        screenshot_b64, target, screen_width, screen_height
+                    )
+                    if florence_result.get("found"):
+                        return {
+                            "found": True,
+                            "x": florence_result["x"],
+                            "y": florence_result["y"],
+                            "label": target,
+                            "confidence": florence_result.get("confidence", 0.8),
+                        }
+                    
                     return _call_ollama_vision(
                         screenshot_b64, target, screen_width, screen_height
                     )
@@ -375,13 +575,42 @@ def find_element(
                 
             except Exception as e:
                 logger.warning(f"PaddleOCR inference failed: {e}")
+                logger.info("Attempting Florence-2 fallback...")
+                
+                # Try Florence-2 natural language grounding
+                florence_result = find_element_by_description(
+                    screenshot_b64, target, screen_width, screen_height
+                )
+                if florence_result.get("found"):
+                    return {
+                        "found": True,
+                        "x": florence_result["x"],
+                        "y": florence_result["y"],
+                        "label": target,  # Use requested target as label
+                        "confidence": florence_result.get("confidence", 0.8),
+                    }
+                
                 logger.info("Falling back to Ollama LLaVA")
                 return _call_ollama_vision(
                     screenshot_b64, target, screen_width, screen_height
                 )
         
-        # PaddleOCR not available, use Ollama
-        logger.debug("PaddleOCR not available, using Ollama LLaVA")
+        # PaddleOCR not available, try Florence-2
+        logger.debug("PaddleOCR not available, attempting Florence-2...")
+        florence_result = find_element_by_description(
+            screenshot_b64, target, screen_width, screen_height
+        )
+        if florence_result.get("found"):
+            return {
+                "found": True,
+                "x": florence_result["x"],
+                "y": florence_result["y"],
+                "label": target,
+                "confidence": florence_result.get("confidence", 0.8),
+            }
+        
+        # Fall back to Ollama LLaVA
+        logger.debug("Florence-2 not available, using Ollama LLaVA")
         return _call_ollama_vision(
             screenshot_b64, target, screen_width, screen_height
         )
