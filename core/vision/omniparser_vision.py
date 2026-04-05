@@ -52,14 +52,11 @@ def _get_paddleocr_reader() -> Optional[Any]:
             from paddleocr import PaddleOCR
             
             # Initialize PaddleOCR with CPU-optimized settings
-            # use_angle_cls=True: Detect rotated text
             # lang="en": English only (faster than multi-language)
             # use_gpu=False: CPU only (no CUDA required)
             _paddleocr_reader = PaddleOCR(
-                use_angle_cls=True,
                 lang="en",
                 use_gpu=False,
-                show_log=False,  # Suppress PaddleOCR verbose logging
             )
             logger.info("✓ PaddleOCR loaded successfully (4-6x faster than EasyOCR)")
             return _paddleocr_reader
