@@ -43,18 +43,17 @@ from flask import render_template
 # Safe imports with fallback for missing models
 find_element = None
 browse = search_web = summarize_page = play_youtube = play_song = None
-
 try:
     from core.vision.omniparser_vision import find_element
 except Exception as _e:
-    logging.getLogger("nemo.imports").warning(f"OmniParser not loaded: {_e}")
-
+    import logging
+    logging.getLogger("nemo").warning(f"Vision not loaded: {_e}")
 try:
     from core.browser.web_agent import (
-        browse, search_web, summarize_page, play_youtube, play_song
-    )
+        browse, search_web, summarize_page, play_youtube, play_song)
 except Exception as _e:
-    logging.getLogger("nemo.imports").warning(f"Browser agent not loaded: {_e}")
+    import logging
+    logging.getLogger("nemo").warning(f"Browser not loaded: {_e}")
 
 
 app = Flask(
@@ -907,12 +906,7 @@ def _action_click(coords: str) -> dict[str, Any]:
             
             # Check if vision is available
             if find_element is None:
-                return {
-                    "success": False,
-                    "error": "Vision model not available for element detection",
-                }
-            
-            # Use OmniParser to find element
+                return {"success": False, "error": "Vision module not available"}
             result = find_element(screenshot_b64, target_name)
             
             if not result.get("found", False):
@@ -1548,6 +1542,53 @@ def _verify_with_vision(
     }
 
 
+def _parse_command_fallback(command: str) -> list[dict[str, str]]:
+    """Fallback command parser for when Ollama is unavailable."""
+    import re
+    
+    command_lower = command.lower().strip()
+    actions = []
+    
+    # Pattern: "open [app] and search [query]"
+    match = re.match(r"open\s+(\w+)\s+and\s+search\s+(?:for\s+)?(.+)", command_lower)
+    if match:
+        app_name = match.group(1)
+        query = match.group(2).strip()
+        actions = [
+            {"action": "open_app", "target": app_name},
+            {"action": "wait", "value": "2"},
+            {"action": "search", "value": query},
+        ]
+        logger.info(f"Parsed via fallback: open {app_name}, search {query}")
+        return actions
+    
+    # Pattern: "open [app]"
+    match = re.match(r"open\s+(\w+)", command_lower)
+    if match:
+        app_name = match.group(1)
+        actions = [{"action": "open_app", "target": app_name}]
+        logger.info(f"Parsed via fallback: open {app_name}")
+        return actions
+    
+    # Pattern: "search [query]"
+    match = re.match(r"search\s+(?:for\s+)?(.+)", command_lower)
+    if match:
+        query = match.group(1).strip()
+        actions = [{"action": "search", "value": query}]
+        logger.info(f"Parsed via fallback: search {query}")
+        return actions
+    
+    # Pattern: "take a screenshot" or "screenshot"
+    if "screenshot" in command_lower:
+        actions = [{"action": "screenshot"}]
+        logger.info("Parsed via fallback: screenshot")
+        return actions
+    
+    # Default: return as is
+    logger.warning(f"Could not parse command: {command}")
+    return []
+
+
 @app.route("/task", methods=["POST"])
 def task() -> dict[str, Any]:
     """
@@ -1587,8 +1628,9 @@ def task() -> dict[str, Any]:
                 "error": "command is required",
             }), 400
 
-        # Step 1: Convert command to action steps via Ollama Qwen2.5
-        logger.info("Converting voice command to action steps via Ollama Qwen2.5")
+        # Step 1: Convert command to action steps via Ollama Qwen2.5 (with fallback)
+        actions = []
+        logger.info("Converting voice command to action steps")
 
         system_prompt = """You are a Windows PC automation system. Convert natural language commands to a JSON array of actions.
 
@@ -1615,6 +1657,7 @@ Examples:
 IMPORTANT: Return ONLY valid JSON array, no extra text. If unclear, return best guess."""
 
         try:
+            logger.info("Attempting to use Ollama for command parsing")
             response = requests.post(
                 "http://localhost:11434/api/generate",
                 json={
@@ -1626,45 +1669,41 @@ IMPORTANT: Return ONLY valid JSON array, no extra text. If unclear, return best 
             )
 
             if response.status_code != 200:
-                logger.error(f"Ollama request failed: {response.status_code}")
-                return jsonify({
-                    "success": False,
-                    "error": f"Ollama connection failed: {response.status_code}",
-                }), 500
+                logger.warning(f"Ollama request failed: {response.status_code}, using fallback parser")
+                actions = _parse_command_fallback(command)
+            else:
+                ollama_response = response.json().get("response", "[]")
+                logger.debug(f"Ollama response: {ollama_response[:200]}")
 
-            ollama_response = response.json().get("response", "[]")
-            logger.debug(f"Ollama response: {ollama_response[:200]}")
+                # Extract JSON from response
+                try:
+                    # Find JSON array in response
+                    start = ollama_response.find("[")
+                    end = ollama_response.rfind("]") + 1
+                    if start >= 0 and end > start:
+                        json_str = ollama_response[start:end]
+                        actions = json.loads(json_str)
+                    else:
+                        actions = json.loads(ollama_response)
 
-            # Extract JSON from response
-            try:
-                # Find JSON array in response
-                start = ollama_response.find("[")
-                end = ollama_response.rfind("]") + 1
-                if start >= 0 and end > start:
-                    json_str = ollama_response[start:end]
-                    actions = json.loads(json_str)
-                else:
-                    actions = json.loads(ollama_response)
+                    if not isinstance(actions, list):
+                        actions = [actions]
 
-                if not isinstance(actions, list):
-                    actions = [actions]
+                    logger.info(f"Parsed {len(actions)} action steps via Ollama")
 
-                logger.info(f"Parsed {len(actions)} action steps from command")
-
-            except json.JSONDecodeError as e:
-                logger.error(f"Failed to parse Ollama JSON response: {e}")
-                logger.debug(f"Response was: {ollama_response}")
-                return jsonify({
-                    "success": False,
-                    "error": f"Failed to parse action steps: {str(e)}",
-                }), 500
+                except json.JSONDecodeError as e:
+                    logger.warning(f"Failed to parse Ollama JSON: {e}, using fallback parser")
+                    actions = _parse_command_fallback(command)
 
         except requests.exceptions.RequestException as e:
-            logger.error(f"Ollama connection error: {e}")
+            logger.warning(f"Ollama unavailable: {e}, using fallback parser")
+            actions = _parse_command_fallback(command)
+        
+        if not actions:
             return jsonify({
                 "success": False,
-                "error": "Ollama not running on localhost:11434",
-            }), 503
+                "error": "Could not parse command",
+            }), 400
 
         # Step 2: Execute each action
         executed_actions = []

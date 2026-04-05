@@ -182,11 +182,11 @@ class ActionExecutor:
 
     def _action_open_app(self, app_name: str, args: str = "") -> dict[str, Any]:
         """Open an application on Windows."""
-        import shutil, os
+        import shutil, os, ctypes
         app_lower = app_name.lower().strip()
-        self.logger.info(f"Opening app: {app_lower}")
-        
-        SPECIAL_PATHS = {
+        self.logger.info(f"Opening: {app_lower}")
+
+        PATHS = {
             "chrome": [
                 r"C:\Program Files\Google\Chrome\Application\chrome.exe",
                 r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
@@ -199,32 +199,29 @@ class ActionExecutor:
                 os.path.expandvars(r"%APPDATA%\WhatsApp\WhatsApp.exe"),
             ],
             "notepad": [r"C:\Windows\System32\notepad.exe"],
+            "calc":    [r"C:\Windows\System32\calc.exe"],
         }
-        
-        exe_path = None
-        if app_lower in SPECIAL_PATHS:
-            for p in SPECIAL_PATHS[app_lower]:
+
+        exe = None
+        if app_lower in PATHS:
+            for p in PATHS[app_lower]:
                 if os.path.isfile(p):
-                    exe_path = p
+                    exe = p
                     break
-        
-        if not exe_path:
-            exe_path = shutil.which(app_lower) or shutil.which(app_lower + ".exe")
-        
+
+        if not exe:
+            exe = shutil.which(app_lower) or shutil.which(app_lower + ".exe")
+
         try:
-            if exe_path:
-                if app_lower == "chrome":
-                    cmd = [exe_path, "--profile-directory=Default",
-                           "--no-first-run", "--start-maximized"]
-                else:
-                    cmd = [exe_path]
+            if exe:
+                cmd = [exe, "--profile-directory=Default",
+                       "--no-first-run", "--start-maximized"] \
+                      if app_lower == "chrome" else [exe]
                 subprocess.Popen(cmd, creationflags=0x00000008)
             else:
-                import ctypes
                 ctypes.windll.shell32.ShellExecuteW(
                     None, "open", app_lower, None, None, 1)
-            
-            time.sleep(2)
+            time.sleep(3)
             
             # If Chrome launched, use CLIP to detect profile picker and handle it
             if app_lower == "chrome":
