@@ -23,7 +23,17 @@ import win32con
 import win32gui
 from flask import Flask, jsonify, request
 from mss import mss
-from PIL import Image
+from PIL import Image, ImageGrab
+
+try:
+    import easyocr
+    import numpy as np
+    import cv2
+    HAS_OCR = True
+except ImportError:
+    HAS_OCR = False
+    logger_early = logging.getLogger("nemo.imports")
+    logger_early.warning("easyocr/numpy/cv2 not available - Chrome profile picker auto-detection disabled")
 
 from core.security.gateway_v2 import SecurityGateway
 from core.security.audit_logger_v2 import AuditLogger
@@ -42,6 +52,17 @@ logger = logging.getLogger("nemo.server")
 
 # Special app paths for applications installed in AppData instead of PATH
 SPECIAL_APP_PATHS = {
+    "chrome": [
+        r"C:\Program Files\Google\Chrome\Application\chrome.exe",
+        r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
+        os.path.expandvars(r"%LOCALAPPDATA%\Google\Chrome\Application\chrome.exe"),
+    ],
+    "edge": [
+        r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe",
+        r"C:\Program Files\Microsoft\Edge\Application\msedge.exe",
+        os.path.expandvars(r"%PROGRAMFILES%\Microsoft\Edge\Application\msedge.exe"),
+        os.path.expandvars(r"%PROGRAMFILES(X86)%\Microsoft\Edge\Application\msedge.exe"),
+    ],
     "whatsapp": [
         # Traditional desktop app paths
         os.path.expandvars(r"%LOCALAPPDATA%\WhatsApp\WhatsApp.exe"),
@@ -59,6 +80,17 @@ SPECIAL_APP_PATHS = {
     "spotify": [
         os.path.expandvars(r"%APPDATA%\Spotify\Spotify.exe"),
     ],
+    "pycharm": [
+        r"C:\Program Files\JetBrains\PyCharm Community Edition\bin\pycharm64.exe",
+        r"C:\Program Files\JetBrains\PyCharm Professional Edition\bin\pycharm64.exe",
+        os.path.expandvars(r"%LOCALAPPDATA%\JetBrains\Toolbox\apps\PyCharm-C\ch-0\bin\pycharm64.exe"),
+        os.path.expandvars(r"%LOCALAPPDATA%\JetBrains\Toolbox\apps\PyCharm-P\ch-0\bin\pycharm64.exe"),
+    ],
+    "jupyter": [
+        os.path.expandvars(r"%LOCALAPPDATA%\Programs\Python\Python312\Scripts\jupyter-notebook.exe"),
+        os.path.expandvars(r"%LOCALAPPDATA%\Programs\Python\Python311\Scripts\jupyter-notebook.exe"),
+        os.path.expandvars(r"%APPDATA%\Python\Scripts\jupyter-notebook.exe"),
+    ],
 }
 
 # Global references (will be injected at startup)
@@ -69,8 +101,136 @@ _audit_logger: Optional[AuditLogger] = None
 _pending_actions: dict[str, dict[str, Any]] = {}
 _pending_lock = threading.Lock()
 
+# OCR reader for Chrome profile picker detection
+_ocr_reader = None
+_ocr_lock = threading.Lock()
+
 # Disable pyautogui safety pause
 pyautogui.PAUSE = 0
+
+
+def _get_ocr():
+    """Get or initialize OCR reader (lazy loading on first use)."""
+    if not HAS_OCR:
+        return None
+    
+    global _ocr_reader
+    if _ocr_reader is None:
+        with _ocr_lock:
+            if _ocr_reader is None:
+                logger.info("Initializing EasyOCR reader (first use)...")
+                _ocr_reader = easyocr.Reader(['en'], gpu=False)
+                logger.info("  ✓ OCR reader ready")
+    return _ocr_reader
+
+
+def _handle_chrome_profile_picker(preferred_profile: str = "Default") -> bool:
+    """
+    Detects the Chrome 'Who is using Chrome?' profile picker screen
+    using OCR, then clicks the correct profile.
+    
+    Args:
+        preferred_profile: Profile name to click (e.g. "Bushra", "V", "Default")
+    
+    Returns:
+        True if picker was detected and handled, False if no picker found
+    """
+    if not HAS_OCR:
+        logger.debug("OCR not available - skipping profile picker detection")
+        return False
+    
+    time.sleep(2)  # Wait for picker to appear
+    
+    try:
+        # Take screenshot
+        screen = ImageGrab.grabclipboard() or ImageGrab.grab()
+        screen_np = np.array(screen)
+        
+        # Run OCR to find all text and their positions
+        reader = _get_ocr()
+        if not reader:
+            return False
+        
+        results = reader.readtext(screen_np)
+        # results format: [[bbox, text, confidence], ...]
+        
+        # Check if this is the Chrome profile picker
+        all_text = " ".join([r[1].lower() for r in results if len(r) >= 2])
+        
+        if not any(keyword in all_text for keyword in ["who", "chrome", "profile", "google"]):
+            logger.debug("No Chrome profile picker detected in current screen")
+            return False
+        
+        logger.info("✓ Chrome profile picker detected via OCR")
+        
+        # Find profile name boxes
+        target_name = preferred_profile.lower()
+        best_match = None
+        best_score = 0
+        
+        for item in results:
+            if len(item) < 2:
+                continue
+            
+            bbox, text = item[0], item[1]
+            confidence = item[2] if len(item) > 2 else 0.5
+            text_lower = text.lower().strip()
+            
+            # Skip generic Chrome UI text
+            skip_words = {"who", "using", "chrome", "guest", "mode", "add", "show", 
+                         "startup", "with", "profiles", "google", "account", "continue"}
+            if text_lower in skip_words or len(text_lower) < 1:
+                continue
+            
+            # Score this result
+            score = 0
+            if target_name == "default" or target_name == "":
+                # Just pick the first real profile name found (confidence > 0.5)
+                if confidence > 0.5:
+                    score = confidence
+            else:
+                # Exact or partial match to preferred name
+                if text_lower == target_name:
+                    score = confidence * 2.0  # exact match wins
+                elif target_name in text_lower or text_lower in target_name:
+                    score = confidence * 1.5
+            
+            if score > best_score:
+                best_score = score
+                best_match = (bbox, text, confidence)
+        
+        if best_match and best_score > 0.5:
+            bbox, text, conf = best_match
+            
+            # Calculate center of bounding box
+            # bbox is [[x1,y1],[x2,y1],[x2,y2],[x1,y2]] or similar format
+            try:
+                xs = [float(p[0]) for p in bbox]
+                ys = [float(p[1]) for p in bbox]
+                cx = int(sum(xs) / len(xs))
+                cy = int(sum(ys) / len(ys))
+                
+                logger.info(f"  → Clicking profile '{text}' at ({cx}, {cy})")
+                pyautogui.click(cx, cy)
+                time.sleep(2)
+                logger.info(f"  ✓ Profile '{text}' selected")
+                return True
+            except (TypeError, ValueError, ZeroDivisionError) as e:
+                logger.warning(f"Error calculating bbox center: {e}")
+                # Fallback: press Enter
+                pyautogui.press("enter")
+                time.sleep(2)
+                return True
+        else:
+            # Fallback: no match found, press Enter to pick first profile
+            logger.warning(f"  ! Profile picker found but '{preferred_profile}' not matched, pressing Enter")
+            pyautogui.press("enter")
+            time.sleep(2)
+            return True
+    
+    except Exception as e:
+        logger.error(f"Profile picker detection failed: {e}")
+        return False
 
 
 def set_dependencies(gateway: SecurityGateway, audit_logger: AuditLogger) -> None:
@@ -441,6 +601,8 @@ def _execute_action(action: str, target: str, value: str) -> dict[str, Any]:
         return _action_open_app(target, value)
     elif action == "type":
         return _action_type(value)
+    elif action == "type_code":
+        return _action_type_code(value)
     elif action == "press_key":
         return _action_press_key(value)
     elif action == "click":
@@ -469,154 +631,111 @@ def _execute_action(action: str, target: str, value: str) -> dict[str, Any]:
 def _action_open_app(app_name: str, args: str = "") -> dict[str, Any]:
     """
     Open an application and bring it to foreground.
-    
-    Handles:
-    - Traditional executables (.exe files)
-    - Microsoft Store apps (package directories)
-    - Apps in standard system paths
-    
-    Tries multiple strategies:
-    1. Check SPECIAL_APP_PATHS for apps (WhatsApp, Telegram, Discord, Spotify)
-    2. Try subprocess.Popen with standard executable name
-    3. For Store apps, use explorer shell:appsFolder protocol
-    4. Fallback to "cmd /c start" for regular apps
-    5. Force window to foreground after launch
+    Simplified, more reliable version using DETACHED_PROCESS.
     """
-    logger.info(f"Opening app: {app_name}")
+    import shutil
+    
+    app_lower = app_name.lower().strip()
+    logger.info(f"Opening app: {app_lower}")
+
+    exe_path = None
 
     try:
-        app_lower = app_name.lower()
-        cmd = None
-        is_store_app = False
-        store_app_package = None
-
-        # Strategy 1: Check special paths for AppData-installed apps
+        # Step 1: Check SPECIAL_APP_PATHS first
         if app_lower in SPECIAL_APP_PATHS:
-            for app_path in SPECIAL_APP_PATHS[app_lower]:
-                if Path(app_path).exists():
-                    # Check if it's a directory (Microsoft Store app) or executable
-                    is_dir = Path(app_path).is_dir()
-                    logger.info(f"Found {app_name} at: {app_path} (dir={is_dir})")
-                    
-                    if is_dir:
-                        # Store app - use explorer shell:appsFolder protocol
-                        is_store_app = True
-                        # Extract package name from path
-                        store_app_package = Path(app_path).name
-                        logger.info(f"{app_name} is a Microsoft Store app (package={store_app_package})")
-                        break
-                    else:
-                        # Regular executable
-                        cmd = [app_path]
-                        break
-        
-        # Strategy 2: Try standard executable if no special path found
-        if not cmd and not is_store_app:
+            for path in SPECIAL_APP_PATHS[app_lower]:
+                if os.path.isfile(path):
+                    exe_path = path
+                    logger.info(f"  Found in SPECIAL_APP_PATHS: {path}")
+                    break
+
+        # Step 2: Check system PATH
+        if not exe_path:
+            found = shutil.which(app_lower)
+            if not found:
+                found = shutil.which(f"{app_lower}.exe")
+            if found:
+                exe_path = found
+                logger.info(f"  Found in PATH: {exe_path}")
+
+        # Step 3: Launch the app
+        if exe_path:
+            # Build command based on app type
             if app_lower == "chrome":
-                cmd = [
-                    "chrome.exe",
-                    "--profile-directory=Default",
-                    "--no-first-run",
-                    "--start-maximized",
-                ]
+                profile = args if args else "Default"
+                cmd = [exe_path,
+                       f"--profile-directory={profile}",
+                       "--no-first-run",
+                       "--start-maximized"]
+                logger.info(f"  Launching Chrome with profile: {profile}")
+            elif app_lower == "edge":
+                cmd = [exe_path, "--start-maximized"]
+                logger.info(f"  Launching Edge")
             else:
-                cmd = [f"{app_name}.exe"] if not app_name.endswith(".exe") else [app_name]
-        
-        # Strategy 3: Try subprocess.Popen (for traditional executables)
-        window_focused = False
-        if cmd:
-            try:
-                subprocess.Popen(cmd)
-                time.sleep(3)  # Wait for app window to appear
-                
-                # Strategy 4: Force window to foreground
-                window_focused = _find_and_focus_window(app_name, timeout=5)
-                
-                logger.info(f"Opened: {app_name} (focused={window_focused})")
-                return {
-                    "success": True,
-                    "action": "open_app",
-                    "app": app_name,
-                    "method": "direct_path" if app_lower in SPECIAL_APP_PATHS else "popen",
-                    "window_focused": window_focused,
-                }
-            except Exception as exc:
-                logger.warning(f"Direct launch failed: {exc}")
-        
-        # Strategy 5: For WhatsApp, use URI protocol (whatsapp:)
-        if app_lower == "whatsapp":
-            try:
-                logger.info(f"Launching WhatsApp using URI protocol (whatsapp:)")
-                subprocess.Popen(["explorer.exe", "whatsapp:"])
-                time.sleep(3)
-                
-                window_focused = _find_and_focus_window(app_name, timeout=5)
-                logger.info(f"Opened WhatsApp via URI: (focused={window_focused})")
-                return {
-                    "success": True,
-                    "action": "open_app",
-                    "app": app_name,
-                    "method": "uri_whatsapp",
-                    "window_focused": window_focused,
-                }
-            except Exception as exc:
-                logger.warning(f"WhatsApp URI launch failed: {exc}")
-        
-        # Strategy 6: For other Store apps, use explorer shell:appsFolder protocol
-        if is_store_app and store_app_package:
-            try:
-                logger.info(f"Launching Store app using explorer shell:appsFolder")
-                # explorer.exe shell:appsFolder\<PackageFamilyName>!App
-                cmd = [
-                    "explorer.exe",
-                    f"shell:appsFolder\\{store_app_package}!App"
-                ]
-                subprocess.Popen(cmd)
-                time.sleep(3)
-                
-                window_focused = _find_and_focus_window(app_name, timeout=5)
-                logger.info(f"Opened Store app: {app_name} (focused={window_focused})")
-                return {
-                    "success": True,
-                    "action": "open_app",
-                    "app": app_name,
-                    "method": "store_app_protocol",
-                    "window_focused": window_focused,
-                }
-            except Exception as exc:
-                logger.warning(f"Store app launch failed: {exc}")
-        
-        # Strategy 7: Fallback to Windows "start" command (for regular apps)
-        if not is_store_app:
-            logger.info(f"Using fallback: cmd /c start {app_name}")
-            subprocess.Popen(["cmd", "/c", "start", app_name])
-            time.sleep(3)  # Wait for app window to appear
+                cmd = [exe_path]
+                logger.info(f"  Launching {app_lower}")
+
+            # Use DETACHED_PROCESS to launch in background without cmd window
+            subprocess.Popen(cmd, creationflags=subprocess.DETACHED_PROCESS)
+            logger.info(f"  ✓ Process started: {exe_path}")
             
-            # Force window to foreground
-            window_focused = _find_and_focus_window(app_name, timeout=5)
+            # Wait for window to appear
+            time.sleep(3)
             
-            logger.info(f"Opened via fallback: {app_name} (focused={window_focused})")
+            # Handle Chrome profile picker if needed
+            if app_lower == "chrome":
+                preferred = args if args else "Default"
+                handled = _handle_chrome_profile_picker(preferred_profile=preferred)
+                if handled:
+                    logger.info(f"  ✓ Chrome profile picker handled: {preferred}")
+                    time.sleep(1)
+            
+            # Bring window to foreground
+            window_focused = _find_and_focus_window(app_lower, timeout=6)
+            logger.info(f"  ✓ Window focused: {window_focused}")
+
             return {
                 "success": True,
                 "action": "open_app",
                 "app": app_name,
-                "method": "fallback_start",
+                "exe_path": exe_path,
                 "window_focused": window_focused,
             }
-        
-        # If all else failed
-        logger.error(f"Could not launch {app_name}")
-        return {
-            "success": False,
-            "error": f"Could not launch application: {app_name}",
-        }
+
+        else:
+            # Fallback: Try ShellExecute (more reliable than cmd /c start)
+            logger.warning(f"  ! {app_lower} not found in paths, trying ShellExecute")
+            try:
+                ctypes.windll.shell32.ShellExecuteW(
+                    None, "open", app_lower, None, None, 1
+                )
+                time.sleep(3)
+                window_focused = _find_and_focus_window(app_lower, timeout=6)
+                
+                return {
+                    "success": True,
+                    "action": "open_app",
+                    "app": app_name,
+                    "exe_path": "shell_execute",
+                    "window_focused": window_focused,
+                }
+            except Exception as exc:
+                logger.error(f"  ✗ ShellExecute also failed: {exc}")
+                return {
+                    "success": False,
+                    "error": f"Could not find or launch {app_name}",
+                    "app": app_name,
+                }
 
     except Exception as exc:
-        logger.error(f"Failed to open {app_name}: {exc}")
+        logger.error(f"Failed to open {app_name}: {exc}", exc_info=True)
         return {
             "success": False,
             "error": str(exc),
+            "app": app_name,
         }
+
+
 
 
 def _action_type(text: str) -> dict[str, Any]:
@@ -656,6 +775,62 @@ def _action_type(text: str) -> dict[str, Any]:
         }
     except Exception as exc:
         logger.error(f"Type failed: {exc}")
+        return {
+            "success": False,
+            "error": str(exc),
+        }
+
+
+def _action_type_code(code: str) -> dict[str, Any]:
+    """
+    Type multi-line code into the active editor window.
+    
+    Handles indentation, newlines, and special characters that pyautogui.write()
+    breaks on by using clipboard paste instead of character-by-character typing.
+    This is much more reliable for code with special chars (colons, brackets, etc).
+    
+    Args:
+        code: Multi-line code string to type
+    
+    Returns:
+        Result dict with success status, line count, and focused window
+    """
+    logger.info(f"Typing code into active window ({len(code.split(chr(10)))} lines)")
+    
+    try:
+        try:
+            import pyperclip
+        except ImportError:
+            logger.error("pyperclip not installed - install with: pip install pyperclip")
+            return {
+                "success": False,
+                "error": "pyperclip module not installed",
+            }
+        
+        current_window, hwnd = _get_foreground_window_info()
+        logger.info(f"Typing code into: {current_window}")
+        
+        # Use clipboard paste for code — much more reliable than typing char-by-char
+        # because pyautogui.write() breaks on special chars like colons, brackets, underscores
+        pyperclip.copy(code)
+        time.sleep(0.3)
+        
+        # Paste from clipboard
+        pyautogui.hotkey("ctrl", "v")
+        time.sleep(0.5)
+        
+        lines = len(code.split("\n"))
+        logger.info(f"Code typed successfully: {lines} lines into {current_window}")
+        
+        return {
+            "success": True,
+            "action": "type_code",
+            "lines": lines,
+            "focused_window": current_window,
+            "chars": len(code),
+        }
+    except Exception as exc:
+        logger.error(f"type_code failed: {exc}")
         return {
             "success": False,
             "error": str(exc),
