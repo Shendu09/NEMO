@@ -2253,6 +2253,16 @@ def start_server(
     )
 
     logger.info(f"Starting NEMO HTTP Server on {host}:{port}")
+    
+    # Phase C: Eager load models to reduce first-request latency
+    logger.info("Phase C: Preloading models...")
+    try:
+        from core.service.model_preloader import ModelPreloader
+        preloader = ModelPreloader(skip_large=False)
+        preloader.preload_all()
+    except Exception as e:
+        logger.warning(f"Model preload skipped: {e}")
+    
     app.run(host=host, port=port, threaded=True, debug=False)
 
 
