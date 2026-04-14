@@ -4,11 +4,11 @@
 
 ## ✨ Features
 
-- **🎤 Voice Control**: Speak commands like "V open chrome" or "V search for face prep"
-- **🌐 HTTP API**: RESTful interface on `localhost:8765` for script integration
-- **🔒 Security-First**: RBAC with Auth0 integration, audit logging, risk classification
-- **👁️ Vision AI**: EasyOCR-based Chrome profile picker auto-detection
-- **🌍 Web Automation**: Browser control, search, screenshot, summarize
+- ** Voice Control**: Speak commands like "V open chrome" or "V search for face prep"
+- ** HTTP API**: RESTful interface on `localhost:8765` for script integration
+- ** Security-First**: RBAC with Auth0 integration, audit logging, risk classification
+- **Vision AI**: EasyOCR-based Chrome profile picker auto-detection
+- ** Web Automation**: Browser control, search, screenshot, summarize
 - **⚡ Windows Apps**: Launch Edge, Chrome, WhatsApp, Discord, Spotify, PyCharm, Jupyter
 - **🔐 Action Confirmation**: LOW/MEDIUM/HIGH risk assessment with approval flow
 
